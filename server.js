@@ -1,0 +1,430 @@
+const express = require('express');
+const http = require('http');
+const WebSocket = require('ws');
+const net = require('net');
+const path = require('path');
+const fs = require('fs');
+const cors = require('cors');
+
+const app = express();
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
+
+app.use(cors());
+app.use(express.json());
+app.use(express.static('public'));
+
+const LOGS_DIR = path.join(__dirname, 'logs');
+if (!fs.existsSync(LOGS_DIR)) {
+    fs.mkdirSync(LOGS_DIR, { recursive: true });
+}
+
+class ClientManager {
+    constructor() {
+        this.clients = new Map();
+        this.webClients = new Set();
+        this.heartbeatInterval = 30000;
+        this.startHeartbeat();
+    }
+
+    addClient(socket, ip, port) {
+        const clientId = `${ip}:${port}`;
+        const client = {
+            id: clientId,
+            ip,
+            port,
+            socket,
+            status: 'online',
+            recording: true,
+            uploadEnabled: false,
+            lastSeen: new Date(),
+            logDir: path.join(LOGS_DIR, ip.replace(/\./g, '_')),
+            commandQueue: [],
+            pendingResponse: null
+        };
+
+        if (!fs.existsSync(client.logDir)) {
+            fs.mkdirSync(client.logDir, { recursive: true });
+        }
+
+        this.clients.set(clientId, client);
+        this.setupSocketListeners(client);
+        this.broadcastToWeb({ type: 'client_connected', client: this.getClientInfo(client) });
+        
+        return client;
+    }
+
+    removeClient(clientId) {
+        const client = this.clients.get(clientId);
+        if (client) {
+            client.status = 'offline';
+            this.broadcastToWeb({ type: 'client_disconnected', clientId });
+        }
+    }
+
+    setupSocketListeners(client) {
+        client.socket.on('data', (data) => {
+            try {
+                const messages = data.toString().split('\n').filter(m => m.trim());
+                messages.forEach(msg => {
+                    try {
+                        const response = JSON.parse(msg);
+                        this.handleResponse(client, response);
+                    } catch (e) {
+                        console.error('解析响应失败:', msg);
+                    }
+                });
+            } catch (e) {
+                console.error('处理数据失败:', e);
+            }
+        });
+
+        client.socket.on('close', () => {
+            this.removeClient(client.id);
+        });
+
+        client.socket.on('error', (err) => {
+            console.error(`客户端 ${client.id} 错误:`, err.message);
+            this.removeClient(client.id);
+        });
+    }
+
+    handleResponse(client, response) {
+        client.lastSeen = new Date();
+        
+        if (response.status === 'ok') {
+            if (response.data) {
+                if (response.data.recording !== undefined) {
+                    client.recording = response.data.recording;
+                }
+                if (response.data.upload_enabled !== undefined) {
+                    client.uploadEnabled = response.data.upload_enabled;
+                }
+            }
+        }
+
+        this.broadcastToWeb({
+            type: 'client_response',
+            clientId: client.id,
+            response
+        });
+    }
+
+    sendCommand(clientId, command) {
+        const client = this.clients.get(clientId);
+        if (!client || client.status === 'offline') {
+            return { success: false, error: '客户端离线' };
+        }
+
+        return new Promise((resolve) => {
+            const commandStr = JSON.stringify(command) + '\n';
+            
+            client.socket.write(commandStr, (err) => {
+                if (err) {
+                    resolve({ success: false, error: err.message });
+                } else {
+                    resolve({ success: true });
+                }
+            });
+        });
+    }
+
+    async broadcastCommand(command) {
+        const results = [];
+        for (const [clientId, client] of this.clients) {
+            if (client.status === 'online') {
+                const result = await this.sendCommand(clientId, command);
+                results.push({ clientId, ...result });
+            }
+        }
+        return results;
+    }
+
+    startHeartbeat() {
+        setInterval(() => {
+            this.clients.forEach(async (client, clientId) => {
+                if (client.status === 'online') {
+                    try {
+                        const result = await this.sendCommand(clientId, { action: 'ping' });
+                        if (!result.success) {
+                            console.log(`心跳失败: ${clientId}`);
+                            client.status = 'offline';
+                            this.broadcastToWeb({ type: 'client_offline', clientId });
+                        }
+                    } catch (e) {
+                        console.log(`心跳异常: ${clientId}`, e.message);
+                        client.status = 'offline';
+                        this.broadcastToWeb({ type: 'client_offline', clientId });
+                    }
+                }
+            });
+        }, this.heartbeatInterval);
+    }
+
+    getClientInfo(client) {
+        return {
+            id: client.id,
+            ip: client.ip,
+            port: client.port,
+            status: client.status,
+            recording: client.recording,
+            uploadEnabled: client.uploadEnabled,
+            lastSeen: client.lastSeen
+        };
+    }
+
+    getAllClients() {
+        return Array.from(this.clients.values()).map(c => this.getClientInfo(c));
+    }
+
+    addWebClient(ws) {
+        this.webClients.add(ws);
+        ws.send(JSON.stringify({
+            type: 'clients_list',
+            clients: this.getAllClients()
+        }));
+    }
+
+    removeWebClient(ws) {
+        this.webClients.delete(ws);
+    }
+
+    broadcastToWeb(data) {
+        const message = JSON.stringify(data);
+        this.webClients.forEach(ws => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(message);
+            }
+        });
+    }
+
+    async scanNetwork(startIp, endIp, ports) {
+        const foundClients = [];
+        const baseIp = startIp.split('.').slice(0, 3).join('.');
+        const start = parseInt(startIp.split('.')[3]);
+        const end = parseInt(endIp.split('.')[3]);
+
+        for (let i = start; i <= end; i++) {
+            const ip = `${baseIp}.${i}`;
+            for (const port of ports) {
+                try {
+                    const client = await this.tryConnect(ip, port);
+                    if (client) {
+                        foundClients.push(client);
+                    }
+                } catch (e) {
+                    // 忽略连接失败的
+                }
+            }
+        }
+
+        return foundClients;
+    }
+
+    tryConnect(ip, port) {
+        return new Promise((resolve) => {
+            const socket = new net.Socket();
+            socket.setTimeout(5000);
+            
+            let resolved = false;
+            const clientId = `${ip}:${port}`;
+
+            const cleanup = () => {
+                if (!resolved) {
+                    resolved = true;
+                    socket.destroy();
+                    this.clients.delete(clientId);
+                    resolve(null);
+                }
+            };
+
+            socket.connect(port, ip, () => {
+                console.log(`TCP 连接成功: ${ip}:${port}`);
+                const client = this.addClient(socket, ip, port);
+                
+                const checkStatus = () => {
+                    if (resolved) return;
+                    
+                    const currentClient = this.clients.get(clientId);
+                    if (currentClient && currentClient.lastSeen > new Date(Date.now() - 3000)) {
+                        resolved = true;
+                        resolve(this.getClientInfo(currentClient));
+                    } else {
+                        setTimeout(checkStatus, 500);
+                    }
+                };
+                
+                setTimeout(() => {
+                    if (!resolved) {
+                        console.log(`等待响应超时: ${clientId}`);
+                        cleanup();
+                    }
+                }, 3000);
+                
+                setTimeout(checkStatus, 500);
+            });
+
+            socket.on('error', (err) => {
+                console.error('连接错误:', err.message);
+                cleanup();
+            });
+
+            socket.on('timeout', () => {
+                console.error('连接超时');
+                cleanup();
+            });
+            
+            socket.on('close', () => {
+                console.log(`连接关闭: ${clientId}`);
+                if (!resolved) {
+                    cleanup();
+                }
+            });
+        });
+    }
+
+    manualConnect(ip, port) {
+        return this.tryConnect(ip, port);
+    }
+}
+
+const clientManager = new ClientManager();
+
+wss.on('connection', (ws) => {
+    console.log('Web 客户端已连接');
+    clientManager.addWebClient(ws);
+
+    ws.on('message', async (message) => {
+        try {
+            const data = JSON.parse(message);
+            
+            switch (data.type) {
+                case 'command':
+                    const result = await clientManager.sendCommand(data.clientId, data.command);
+                    ws.send(JSON.stringify({ type: 'command_result', result }));
+                    break;
+                
+                case 'broadcast_command':
+                    const results = await clientManager.broadcastCommand(data.command);
+                    ws.send(JSON.stringify({ type: 'broadcast_result', results }));
+                    break;
+                
+                case 'scan_network':
+                    const found = await clientManager.scanNetwork(
+                        data.startIp,
+                        data.endIp,
+                        data.ports || [9999]
+                    );
+                    ws.send(JSON.stringify({ type: 'scan_complete', found }));
+                    break;
+                
+                case 'manual_connect':
+                    const client = await clientManager.manualConnect(data.ip, data.port);
+                    ws.send(JSON.stringify({ type: 'connect_result', client }));
+                    break;
+                
+                case 'disconnect_client':
+                    const targetClient = clientManager.clients.get(data.clientId);
+                    if (targetClient) {
+                        targetClient.socket.end();
+                        clientManager.removeClient(data.clientId);
+                    }
+                    ws.send(JSON.stringify({ type: 'disconnected', clientId: data.clientId }));
+                    break;
+            }
+        } catch (e) {
+            ws.send(JSON.stringify({ type: 'error', message: e.message }));
+        }
+    });
+
+    ws.on('close', () => {
+        console.log('Web 客户端已断开');
+        clientManager.removeWebClient(ws);
+    });
+});
+
+app.get('/api/clients', (req, res) => {
+    res.json(clientManager.getAllClients());
+});
+
+app.get('/api/clients/:clientId/logs', (req, res) => {
+    const client = clientManager.clients.get(req.params.clientId);
+    if (!client) {
+        return res.status(404).json({ error: '客户端不存在' });
+    }
+
+    try {
+        const files = fs.readdirSync(client.logDir)
+            .filter(f => f.endsWith('.log'))
+            .map(f => {
+                const stat = fs.statSync(path.join(client.logDir, f));
+                return {
+                    filename: f,
+                    size: stat.size,
+                    uploadTime: stat.mtime
+                };
+            });
+        res.json(files);
+    } catch (e) {
+        res.json([]);
+    }
+});
+
+app.get('/api/clients/:clientId/logs/:filename', (req, res) => {
+    const client = clientManager.clients.get(req.params.clientId);
+    if (!client) {
+        return res.status(404).json({ error: '客户端不存在' });
+    }
+
+    const filePath = path.join(client.logDir, req.params.filename);
+    if (!filePath.startsWith(client.logDir)) {
+        return res.status(403).json({ error: '非法路径' });
+    }
+
+    try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        res.json({ content });
+    } catch (e) {
+        res.status(404).json({ error: '文件不存在' });
+    }
+});
+
+app.get('/api/clients/:clientId/logs/:filename/download', (req, res) => {
+    const client = clientManager.clients.get(req.params.clientId);
+    if (!client) {
+        return res.status(404).json({ error: '客户端不存在' });
+    }
+
+    const filePath = path.join(client.logDir, req.params.filename);
+    if (!filePath.startsWith(client.logDir)) {
+        return res.status(403).json({ error: '非法路径' });
+    }
+
+    res.download(filePath);
+});
+
+app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: '10mb' }), (req, res) => {
+    const ip = req.params.ip;
+    const clientId = clientManager.clients.keys().find(id => id.startsWith(ip));
+    
+    if (!clientId) {
+        return res.status(404).json({ error: '客户端不存在' });
+    }
+
+    const client = clientManager.clients.get(clientId);
+    const filename = `${ip}_${new Date().toISOString().split('T')[0].replace(/-/g, '')}.log`;
+    const filePath = path.join(client.logDir, filename);
+
+    fs.appendFile(filePath, req.body, (err) => {
+        if (err) {
+            return res.status(500).json({ error: '保存失败' });
+        }
+        res.json({ success: true, filename });
+    });
+});
+
+const PORT = process.env.PORT || 3232;
+server.listen(PORT, () => {
+    console.log(`服务器运行在端口 ${PORT}`);
+    console.log(`访问 http://localhost:${PORT} 打开管理界面`);
+});

