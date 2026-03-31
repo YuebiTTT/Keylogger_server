@@ -1,2 +1,4 @@
-node_modules\
-logs\
+
+logs/
+node_modules/
+node_modules/.package-lock.json
