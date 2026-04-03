@@ -99,6 +99,14 @@ function handleWebSocketMessage(data) {
             showToast('客户端已断开连接', 'success');
             break;
 
+        case 'client_deleted':
+            showToast(`客户端 ${data.clientId} 已删除`, 'success');
+            // 更新客户端列表
+            clients = clients.filter(c => c.id !== data.clientId);
+            updateClientsTable();
+            updateLogClientSelect();
+            break;
+
         case 'error':
             showToast(`错误: ${data.message}`, 'error');
             break;
@@ -137,6 +145,7 @@ function updateClientsTable() {
             <td class="action-btns">
                 <button class="btn btn-primary btn-sm" onclick="showClientDetails('${client.id}')">详情</button>
                 <button class="btn btn-danger btn-sm" onclick="disconnectClient('${client.id}')">断开</button>
+                <button class="btn btn-danger btn-sm" onclick="deleteClient('${client.id}')">删除</button>
             </td>
         </tr>
     `).join('');
@@ -277,6 +286,15 @@ function disconnectClient(clientId) {
     if (confirm('确定要断开此客户端吗？')) {
         ws.send(JSON.stringify({
             type: 'disconnect_client',
+            clientId
+        }));
+    }
+}
+
+function deleteClient(clientId) {
+    if (confirm('确定要删除此客户端吗？这将从已知客户端列表中移除它。')) {
+        ws.send(JSON.stringify({
+            type: 'delete_client',
             clientId
         }));
     }
