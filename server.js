@@ -9,7 +9,7 @@ const axios = require('axios');
 const mysql = require('mysql2/promise');
 require('dotenv').config();
 
-// ==================== 初始化 Express ====================
+//  初始化 Express 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -18,7 +18,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-// ==================== Alist 客户端 ====================
+//  Alist 客户端 
 const ALIST_CONFIG = {
     url: process.env.ALIST_URL || 'http://10.88.202.73:5244',
     basePath: process.env.ALIST_BASE_PATH || '/学生目录/log',
@@ -163,7 +163,7 @@ class AlistClient {
 
 const alistClient = new AlistClient(ALIST_CONFIG);
 
-// ==================== MySQL 连接池 ====================
+//  MySQL 连接池 
 const dbConfig = {
     host: process.env.DB_HOST || 'localhost',
     port: parseInt(process.env.DB_PORT) || 3306,
@@ -259,7 +259,7 @@ async function updateLastSeen(clientId) {
     }
 }
 
-// ==================== ClientManager ====================
+//  ClientManager 
 const TCP_LISTEN_PORT = parseInt(process.env.TCP_PORT) || 9999;
 
 class ClientManager {
@@ -511,7 +511,7 @@ class ClientManager {
         });
     }
 
-    // ---------- 主动扫描功能 ----------
+    // 主动扫描
     async scanNetwork(startIp, endIp, ports = [9999]) {
         const startParts = startIp.split('.').map(Number);
         const endParts = endIp.split('.').map(Number);
@@ -658,7 +658,7 @@ class ClientManager {
 
 const clientManager = new ClientManager();
 
-// ==================== WebSocket 处理 ====================
+//WebSocket 处理
 wss.on('connection', (ws) => {
     console.log('Web 客户端已连接');
     clientManager.addWebClient(ws);
@@ -722,7 +722,7 @@ wss.on('connection', (ws) => {
     });
 });
 
-// ==================== HTTP API ====================
+//HTTP API
 app.get('/api/clients', (req, res) => {
     res.json(clientManager.getAllClients());
 });
@@ -772,6 +772,21 @@ app.get('/api/clients/:clientId/logs/:filename/download', async (req, res) => {
         }
     }
 });
+//读取返回的内容
+app.get('/api/clients/:clientId/logs/:filename/raw', async (req, res) => {
+    const client = clientManager.clients.get(req.params.clientId);
+    if (!client) {
+        return res.status(404).send('客户端不存在或离线');
+    }
+    const filePath = `${client.logDir}/${req.params.filename}`;
+    try {
+        const content = await alistClient.readFile(filePath);
+        res.type('text/plain').send(content);
+    } catch (e) {
+        console.error('读取文件失败:', e);
+        res.status(404).send('文件不存在或无法读取');
+    }
+});
 
 app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: '10mb' }), async (req, res) => {
     const ip = req.params.ip;
@@ -790,7 +805,7 @@ app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: '10mb' }), 
     }
 });
 
-// ==================== 启动服务 ====================
+//启动服务
 const PORT = parseInt(process.env.PORT) || 3232;
 server.listen(PORT, () => {
     console.log(`HTTP 服务运行在端口 ${PORT}`);
