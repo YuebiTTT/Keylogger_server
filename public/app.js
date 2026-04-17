@@ -751,9 +751,15 @@ async function viewLatestPasswords() {
         if (response.ok) {
             const content = await response.text();
             console.log('提取结果内容长度:', content.length);
-            document.getElementById('logModalTitle').textContent = '提取的密码';
-            document.getElementById('logContent').textContent = content;
-            document.getElementById('logModal').classList.add('show');
+            
+            // 解析提取结果
+            const passwords = parseExtractedPasswords(content);
+            
+            // 显示提取结果
+            displayExtractedPasswords(passwords);
+            
+            // 显示模态框
+            document.getElementById('extractModal').classList.add('show');
         } else {
             const errorText = await response.text();
             console.error('查看提取结果失败:', errorText);
@@ -763,6 +769,103 @@ async function viewLatestPasswords() {
         console.error('查看密码提取结果失败:', e);
         showToast('查看失败，可能还没有提取过密码', 'error');
     }
+}
+
+// 解析提取的密码
+function parseExtractedPasswords(content) {
+    const passwords = [];
+    const lines = content.split('\n');
+    let currentPassword = null;
+    
+    for (const line of lines) {
+        const trimmedLine = line.trim();
+        
+        if (trimmedLine.match(/^\d+\.\s*来自:/)) {
+            // 新密码项
+            if (currentPassword) {
+                passwords.push(currentPassword);
+            }
+            const match = trimmedLine.match(/^(\d+)\.\s*来自:(.*)/);
+            currentPassword = {
+                index: parseInt(match[1]),
+                file: match[2].trim(),
+                timestamp: '',
+                password: ''
+            };
+        } else if (currentPassword) {
+            if (trimmedLine.startsWith('时间:')) {
+                currentPassword.timestamp = trimmedLine.substring(4).trim();
+            } else if (trimmedLine.startsWith('内容:')) {
+                currentPassword.password = trimmedLine.substring(4).trim();
+            }
+        }
+    }
+    
+    // 添加最后一个密码
+    if (currentPassword) {
+        passwords.push(currentPassword);
+    }
+    
+    return passwords;
+}
+
+// 显示提取的密码
+function displayExtractedPasswords(passwords) {
+    const extractList = document.getElementById('extractList');
+    const extractStats = document.getElementById('extractStats');
+    
+    // 更新统计信息
+    extractStats.textContent = `共 ${passwords.length} 个密码`;
+    
+    if (passwords.length === 0) {
+        extractList.innerHTML = `
+            <div class="extract-empty">
+                <i class="fas fa-key"></i>
+                <p>暂无提取的密码</p>
+            </div>
+        `;
+        return;
+    }
+    
+    // 生成密码列表
+    let html = '';
+    passwords.forEach(item => {
+        html += `
+            <div class="extract-item">
+                <div class="index">${item.index}</div>
+                <div class="password-content">${escapeHtml(item.password)}</div>
+                <div class="source-file">${escapeHtml(item.file)}</div>
+                <div class="timestamp">${escapeHtml(item.timestamp)}</div>
+            </div>
+        `;
+    });
+    
+    extractList.innerHTML = html;
+    
+    // 添加搜索功能
+    const searchInput = document.getElementById('extractSearch');
+    searchInput.oninput = function() {
+        const searchTerm = this.value.toLowerCase();
+        const items = extractList.querySelectorAll('.extract-item');
+        
+        items.forEach(item => {
+            const password = item.querySelector('.password-content').textContent.toLowerCase();
+            const file = item.querySelector('.source-file').textContent.toLowerCase();
+            
+            if (password.includes(searchTerm) || file.includes(searchTerm)) {
+                item.style.display = '';
+            } else {
+                item.style.display = 'none';
+            }
+        });
+    };
+}
+
+// 转义HTML字符
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 // 页面关闭前清理定时器

@@ -315,21 +315,38 @@ class AlistClient {
     async downloadFile(filePath, res) {
         const fullPath = this._getFullPath(filePath);
         await this._ensureToken();
-        const url = `${this.baseUrl}/api/fs/get?path=${encodeURIComponent(fullPath)}`;
+        
+        // 首先获取文件信息，包含 raw_url
+        const infoResponse = await axios({
+            method: 'GET',
+            url: `${this.baseUrl}/api/fs/get?path=${encodeURIComponent(fullPath)}`,
+            headers: { 'Authorization': this.token }
+        });
+
+        if (infoResponse.data.code !== 200 || !infoResponse.data.data || !infoResponse.data.data.raw_url) {
+            throw new Error('获取文件下载链接失败');
+        }
+
+        const rawUrl = infoResponse.data.data.raw_url;
+        
+        // 使用 raw_url 下载实际文件
         const response = await axios({
             method: 'GET',
-            url,
+            url: rawUrl,
             headers: { 'Authorization': this.token },
             responseType: 'stream'
         });
 
+        // 设置响应头
         if (response.headers['content-type']) {
             res.setHeader('Content-Type', response.headers['content-type']);
         }
-        if (response.headers['content-disposition']) {
-            res.setHeader('Content-Disposition', response.headers['content-disposition']);
-        }
+        
+        // 从文件路径中提取文件名
+        const filename = path.basename(filePath);
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
 
+        // 处理错误和管道
         response.data.on('error', (err) => {
             res.destroy(err);
         });

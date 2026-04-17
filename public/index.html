@@ -748,6 +748,79 @@
             background: var(--primary);
         }
 
+        /* 提取结果样式 */
+        .extract-list .extract-item {
+            display: grid;
+            grid-template-columns: 60px 1fr 1fr 200px;
+            padding: 1rem;
+            border-bottom: 1px solid var(--gray-light);
+            transition: all 0.2s ease;
+            align-items: center;
+        }
+
+        .extract-list .extract-item:hover {
+            background: rgba(59, 130, 246, 0.05);
+            transform: translateX(5px);
+        }
+
+        .extract-list .extract-item:nth-child(even) {
+            background: var(--light);
+        }
+
+        .extract-list .extract-item .password-content {
+            font-family: 'Consolas', monospace;
+            font-size: 0.9rem;
+            color: var(--dark);
+            word-break: break-all;
+        }
+
+        .extract-list .extract-item .source-file {
+            font-size: 0.85rem;
+            color: var(--gray);
+        }
+
+        .extract-list .extract-item .timestamp {
+            font-size: 0.85rem;
+            color: var(--gray);
+        }
+
+        .extract-list .extract-item .index {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--primary);
+        }
+
+        .extract-list::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .extract-list::-webkit-scrollbar-track {
+            background: var(--light);
+        }
+
+        .extract-list::-webkit-scrollbar-thumb {
+            background: var(--gray-light);
+            border-radius: 4px;
+            transition: all 0.2s ease;
+        }
+
+        .extract-list::-webkit-scrollbar-thumb:hover {
+            background: var(--primary);
+        }
+
+        .extract-empty {
+            text-align: center;
+            padding: 4rem 2rem;
+            color: var(--gray);
+            background: var(--light);
+        }
+
+        .extract-empty i {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            color: var(--primary);
+        }
+
         .tabs {
             display: flex;
             border-bottom: 1px solid var(--gray-light);
@@ -1114,6 +1187,32 @@
                 <button class="close-btn" onclick="hideModal('logModal')">&times;</button>
             </div>
             <div class="log-viewer" id="logContent"></div>
+        </div>
+    </div>
+
+    <!-- 提取结果模态框 -->
+    <div class="modal" id="extractModal">
+        <div class="modal-content" style="max-width: 1000px; max-height: 80vh;">
+            <div class="modal-header">
+                <h3 id="extractModalTitle">提取的密码</h3>
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <div class="search-box" style="position: relative;">
+                        <input type="text" id="extractSearch" placeholder="搜索密码..." style="padding: 0.5rem; border: 1px solid var(--gray-light); border-radius: 4px; width: 200px;">
+                        <i class="fas fa-search" style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: var(--gray);"></i>
+                    </div>
+                    <span id="extractStats" style="font-size: 0.9rem; color: var(--gray);"></span>
+                    <button class="close-btn" onclick="hideModal('extractModal')">&times;</button>
+                </div>
+            </div>
+            <div class="extract-container" style="overflow: hidden; display: flex; flex-direction: column; height: calc(80vh - 120px);">
+                <div class="extract-header" style="display: grid; grid-template-columns: 60px 1fr 1fr 200px; padding: 1rem; background: var(--light); border-bottom: 1px solid var(--gray-light); font-weight: 600; color: var(--dark);">
+                    <div>序号</div>
+                    <div>密码内容</div>
+                    <div>来源文件</div>
+                    <div>时间戳</div>
+                </div>
+                <div class="extract-list" id="extractList" style="flex: 1; overflow-y: auto;"></div>
+            </div>
         </div>
     </div>
 
