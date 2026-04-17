@@ -747,13 +747,17 @@ async function viewLatestPasswords() {
     try {
         // 直接从服务器本地读取提取结果文件
         const response = await fetch('/api/extract-passwords/view');
+        console.log('查看提取结果响应状态:', response.status);
         if (response.ok) {
             const content = await response.text();
+            console.log('提取结果内容长度:', content.length);
             document.getElementById('logModalTitle').textContent = '提取的密码';
             document.getElementById('logContent').textContent = content;
             document.getElementById('logModal').classList.add('show');
         } else {
-            showToast('查看失败，可能还没有提取过密码', 'error');
+            const errorText = await response.text();
+            console.error('查看提取结果失败:', errorText);
+            showToast(`查看失败: ${errorText}`, 'error');
         }
     } catch (e) {
         console.error('查看密码提取结果失败:', e);

@@ -1221,13 +1221,19 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
             return `${index + 1}. 来自: ${item.file}\n时间: ${item.timestamp}\n内容: ${item.password}\n`;
         }).join('\n');
         
+        // 使用绝对路径确保文件路径正确
+        const logsDir = path.join(__dirname, 'logs');
+        const filePath = path.join(logsDir, resultFilename);
+        
         // 确保 logs 目录存在
-        if (!fs.existsSync('./logs')) {
-            fs.mkdirSync('./logs', { recursive: true });
+        if (!fs.existsSync(logsDir)) {
+            fs.mkdirSync(logsDir, { recursive: true });
+            logger.info(`创建 logs 目录: ${logsDir}`);
         }
         
         // 写入本地文件
-        fs.writeFileSync(`./logs/${resultFilename}`, resultContent);
+        fs.writeFileSync(filePath, resultContent);
+        logger.info(`成功保存提取结果到: ${filePath}, 大小: ${resultContent.length} 字节`);
         
         res.json({ 
             success: true, 
@@ -1242,16 +1248,21 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
 app.get('/api/extract-passwords/view', asyncHandler(async (req, res) => {
     try {
         const resultFilename = 'extracted_passwords.txt';
-        const filePath = `./logs/${resultFilename}`;
+        // 使用绝对路径确保文件路径正确
+        const filePath = path.join(__dirname, 'logs', resultFilename);
+        
+        logger.info(`尝试读取提取结果文件: ${filePath}`);
         
         if (!fs.existsSync(filePath)) {
+            logger.warn(`提取结果文件不存在: ${filePath}`);
             return res.status(404).send('提取结果文件不存在');
         }
         
         const content = fs.readFileSync(filePath, 'utf8');
+        logger.info(`成功读取提取结果文件，大小: ${content.length} 字节`);
         res.type('text/plain').send(content);
     } catch (error) {
-        logger.error('查看提取结果失败', { error: error.message });
+        logger.error('查看提取结果失败', { error: error.message, stack: error.stack });
         res.status(500).send('查看提取结果失败');
     }
 }));
