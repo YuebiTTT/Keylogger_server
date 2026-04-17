@@ -1134,7 +1134,13 @@ app.get('/api/clients/:clientId/logs/:filename/download', asyncHandler(async (re
     const filePath = filename.startsWith('passwords_') 
         ? `${alistClient.basePath}/${filename}` 
         : `${(clientInfo.exists ? clientInfo.logDir : alistClient.basePath)}/${filename}`;
-    await alistClient.downloadFile(filePath, res);
+    
+    try {
+        await alistClient.downloadFile(filePath, res);
+    } catch (error) {
+        logger.error('下载日志失败', { error: error.message, filePath });
+        res.status(500).json({ error: '下载失败: ' + error.message });
+    }
 }));
 
 app.get('/api/clients/:clientId/logs/:filename/raw', asyncHandler(async (req, res) => {
