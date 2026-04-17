@@ -44,7 +44,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
         document.getElementById(page + 'Page').style.display = 'block';
         if (page === 'logs') {
             populateClientSelect();
-            if (dom.logClientSelect.value) refreshLogs();
+            refreshLogs();
             startAutoRefresh();
         } else {
             stopAutoRefresh();
@@ -483,14 +483,18 @@ function scanNetwork() {
 // 刷新日志列表（日志页面）
 async function refreshLogs() {
     const clientId = dom.logClientSelect.value;
-    if (!clientId) {
-        showToast('请选择客户端', 'error');
-        return;
-    }
     try {
-        const response = await fetch(`/api/clients/${clientId}/logs`);
-        const logs = await response.json();
-        renderLogsTable(logs, clientId);
+        let logs, fetchClientId;
+        if (clientId) {
+            const response = await fetch(`/api/clients/${clientId}/logs`);
+            logs = await response.json();
+            fetchClientId = clientId;
+        } else {
+            const response = await fetch('/api/logs');
+            logs = await response.json();
+            fetchClientId = null;
+        }
+        renderLogsTable(logs, fetchClientId);
     } catch (e) {
         console.error('刷新日志失败:', e);
         showToast('刷新失败', 'error');
@@ -507,18 +511,29 @@ function renderLogsTable(logs, clientId) {
     logs.forEach(log => {
         const size = formatFileSize(log.size);
         const time = log.uploadTime ? new Date(log.uploadTime).toLocaleString() : '未知';
-        html += `<tr>
-            <td>${escapeHtml(log.filename)}</td>
-            <td>${size}</td>
-            <td>${time}</td>
-            <td>
-                <div class="action-btns">
-                    <button class="btn btn-sm btn-primary" onclick="viewLog('${escapeHtml(clientId)}', '${escapeHtml(log.filename)}')">查看</button>
-                    <button class="btn btn-sm btn-success" onclick="downloadLog('${escapeHtml(clientId)}', '${escapeHtml(log.filename)}')">下载</button>
-                    <button class="btn btn-sm btn-danger" onclick="deleteLog('${escapeHtml(clientId)}', '${escapeHtml(log.filename)}')">删除</button>
-                </div>
-            </td>
-        </tr>`;
+        let logClientId = clientId;
+        if (!logClientId) {
+            const ipMatch = log.filename.match(/^(\d+\.\d+\.\d+\.\d+)_/);
+            if (ipMatch) {
+                const ip = ipMatch[1];
+                const client = clients.find(c => c.ip === ip);
+                logClientId = client ? client.id : `${ip}:9999`;
+            }
+        }
+        if (logClientId) {
+            html += `<tr>
+                <td>${escapeHtml(log.filename)}</td>
+                <td>${size}</td>
+                <td>${time}</td>
+                <td>
+                    <div class="action-btns">
+                        <button class="btn btn-sm btn-primary" onclick="viewLog('${escapeHtml(logClientId)}', '${escapeHtml(log.filename)}')">查看</button>
+                        <button class="btn btn-sm btn-success" onclick="downloadLog('${escapeHtml(logClientId)}', '${escapeHtml(log.filename)}')">下载</button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteLog('${escapeHtml(logClientId)}', '${escapeHtml(log.filename)}')">删除</button>
+                    </div>
+                </td>
+            </tr>`;
+        }
     });
     dom.logsTable.innerHTML = html;
 }
@@ -634,9 +649,7 @@ document.getElementById('logSearch')?.addEventListener('input', (e) => {
 function startAutoRefresh() {
     if (autoRefreshTimer) return;
     autoRefreshTimer = setInterval(() => {
-        if (dom.logClientSelect.value) {
-            refreshLogs();
-        }
+        refreshLogs();
     }, AUTO_REFRESH_INTERVAL);
 }
 

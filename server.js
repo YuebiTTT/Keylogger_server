@@ -1085,6 +1085,16 @@ app.get('/api/clients', (req, res) => {
     res.json(clientManager.getAllClients());
 });
 
+app.get('/api/logs', asyncHandler(async (req, res) => {
+    try {
+        const allFiles = await alistClient.listFiles(alistClient.basePath);
+        res.json(allFiles);
+    } catch (error) {
+        logger.error('获取所有日志失败', { error: error.message });
+        res.status(500).json({ error: '获取日志失败' });
+    }
+}));
+
 app.get('/api/clients/:clientId/logs', asyncHandler(async (req, res) => {
     const clientInfo = getClientInfoById(req.params.clientId);
     if (!clientInfo.exists) {
