@@ -777,15 +777,12 @@ async function extractPasswords() {
 // 查看密码提取结果
 async function viewLatestPasswords() {
     try {
-        // 直接从服务器本地读取提取结果文件
-        const response = await fetch('/api/extract-passwords/view');
+        // 尝试从服务器获取JSON格式的提取结果
+        const response = await fetch('/logs/extracted_passwords.json');
         console.log('查看提取结果响应状态:', response.status);
         if (response.ok) {
-            const content = await response.text();
-            console.log('提取结果内容长度:', content.length);
-            
-            // 解析提取结果
-            const passwords = parseExtractedPasswords(content);
+            const passwords = await response.json();
+            console.log('提取结果数量:', passwords.length);
             
             // 显示提取结果
             displayExtractedPasswords(passwords);
@@ -793,9 +790,25 @@ async function viewLatestPasswords() {
             // 显示模态框
             document.getElementById('extractModal').classList.add('show');
         } else {
-            const errorText = await response.text();
-            console.error('查看提取结果失败:', errorText);
-            showToast(`查看失败: ${errorText}`, 'error');
+            // 如果JSON文件不存在，尝试读取文本格式
+            const textResponse = await fetch('/api/extract-passwords/view');
+            if (textResponse.ok) {
+                const content = await textResponse.text();
+                console.log('提取结果内容长度:', content.length);
+                
+                // 解析提取结果
+                const passwords = parseExtractedPasswords(content);
+                
+                // 显示提取结果
+                displayExtractedPasswords(passwords);
+                
+                // 显示模态框
+                document.getElementById('extractModal').classList.add('show');
+            } else {
+                const errorText = await textResponse.text();
+                console.error('查看提取结果失败:', errorText);
+                showToast(`查看失败: ${errorText}`, 'error');
+            }
         }
     } catch (e) {
         console.error('查看密码提取结果失败:', e);
@@ -861,7 +874,7 @@ function displayExtractedPasswords(passwords) {
     
     // 生成密码列表
     let html = '';
-    passwords.forEach(item => {
+    passwords.forEach((item, index) => {
         // 提取客户端ID和文件名
         let clientId = '';
         let filename = item.file;
@@ -874,12 +887,18 @@ function displayExtractedPasswords(passwords) {
             clientId = client ? client.id : `${ip}:9999`;
         }
         
+        // 检查是否有原始密码
+        const hasRawPassword = item.rawPassword && item.rawPassword !== item.password;
+        
         html += `
             <div class="extract-item">
-                <div class="index">${item.index}</div>
-                <div class="password-content">${escapeHtml(item.password)}</div>
+                <div class="index">${item.index || (index + 1)}</div>
+                <div class="password-content">
+                    ${escapeHtml(item.password)}
+                    ${hasRawPassword ? '<span class="processed-badge">已处理</span>' : ''}
+                </div>
                 <div class="source-file">
-                    <a href="javascript:void(0)" onclick="viewLogWithPassword('${escapeHtml(clientId)}', '${escapeHtml(filename)}', '${escapeHtml(item.password)}')" style="color: var(--primary); text-decoration: underline; cursor: pointer;">
+                    <a href="javascript:void(0)" onclick="viewLogWithPassword('${escapeHtml(clientId)}', '${escapeHtml(filename)}', '${hasRawPassword ? escapeHtml(item.rawPassword) : escapeHtml(item.password)}')" style="color: var(--primary); text-decoration: underline; cursor: pointer;">
                         ${escapeHtml(item.file)}
                     </a>
                 </div>

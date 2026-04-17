@@ -840,6 +840,28 @@
             animation: blink 1s ease-in-out 2;
         }
 
+        /* 已处理标记样式 */
+        .processed-badge {
+            display: inline-block;
+            background-color: #d4edda;
+            color: #155724;
+            padding: 0.2rem 0.5rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            margin-left: 0.5rem;
+            border: 1px solid #c3e6cb;
+        }
+
+        /* 模态框层级 */
+        #extractModal {
+            z-index: 1000;
+        }
+
+        #logModal {
+            z-index: 900;
+        }
+
         .tabs {
             display: flex;
             border-bottom: 1px solid var(--gray-light);

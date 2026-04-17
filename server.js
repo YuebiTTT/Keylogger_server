@@ -169,6 +169,10 @@ app.get('/logout', (req, res) => {
 app.use(authMiddleware);
 app.use(express.static('public'));
 
+// 提供logs目录的静态文件访问
+const logsDir = path.join(__dirname, 'logs');
+app.use('/logs', express.static(logsDir));
+
 // Alist 客户端
 class AlistClient {
     constructor(config) {
@@ -1229,14 +1233,27 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
             return res.json({ success: true, count: 0 });
         }
         
+        // 使用绝对路径确保文件路径正确
+        const logsDir = path.join(__dirname, 'logs');
+        
         // 保存提取结果到本地文件
         const resultFilename = 'extracted_passwords.txt';
         const resultContent = uniquePasswords.map((item, index) => {
-            return `${index + 1}. 来自: ${item.file}\n时间: ${item.timestamp}\n内容: ${item.password}\n`;
+            const hasRawPassword = item.rawPassword && item.rawPassword !== item.password;
+            let content = `${index + 1}. 来自: ${item.file}\n时间: ${item.timestamp}\n内容: ${item.password}\n`;
+            if (hasRawPassword) {
+                content += `原始: ${item.rawPassword}\n`;
+            }
+            return content;
         }).join('\n');
         
-        // 使用绝对路径确保文件路径正确
-        const logsDir = path.join(__dirname, 'logs');
+        // 也保存为JSON格式，方便前端解析
+        const jsonFilename = 'extracted_passwords.json';
+        const jsonContent = JSON.stringify(uniquePasswords, null, 2);
+        const jsonFilePath = path.join(logsDir, jsonFilename);
+        fs.writeFileSync(jsonFilePath, jsonContent);
+        logger.info(`成功保存提取结果(JSON)到: ${jsonFilePath}, 大小: ${jsonContent.length} 字节`);
+        
         const filePath = path.join(logsDir, resultFilename);
         
         // 确保 logs 目录存在
@@ -1382,7 +1399,8 @@ function extractPasswordsFromLog(content, filename) {
                 passwords.push({
                     file: filename,
                     timestamp: timestamp,
-                    password: parsedPassword
+                    password: parsedPassword,
+                    rawPassword: rawPassword
                 });
             }
         }
