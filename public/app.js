@@ -241,8 +241,16 @@ function renderClientsTable() {
         return;
     }
 
+    // 按照连接状态排序：在线的在前面，离线的在后面
+    const sortedClients = [...clients].sort((a, b) => {
+        if (a.status === 'online' && b.status !== 'online') return -1;
+        if (a.status !== 'online' && b.status === 'online') return 1;
+        // 状态相同时，按照 IP 地址排序
+        return a.ip.localeCompare(b.ip);
+    });
+
     let html = '';
-    clients.forEach(client => {
+    sortedClients.forEach(client => {
         const statusClass = client.status === 'online' ? 'status-online' : 'status-offline';
         const recordClass = client.recording ? 'status-recording' : 'status-paused';
         const uploadClass = client.uploadEnabled ? 'status-recording' : 'status-paused';
@@ -287,8 +295,16 @@ function renderClientsTable() {
 
 // 填充日志页面的客户端下拉框
 function populateClientSelect() {
+    // 按照连接状态排序：在线的在前面，离线的在后面
+    const sortedClients = [...clients].sort((a, b) => {
+        if (a.status === 'online' && b.status !== 'online') return -1;
+        if (a.status !== 'online' && b.status === 'online') return 1;
+        // 状态相同时，按照 IP 地址排序
+        return a.ip.localeCompare(b.ip);
+    });
+
     let html = '<option value="">全部</option>';
-    clients.forEach(client => {
+    sortedClients.forEach(client => {
         html += `<option value="${escapeHtml(client.id)}">${escapeHtml(client.ip)}:${escapeHtml(client.port)} (${escapeHtml(client.status)})</option>`;
     });
     dom.logClientSelect.innerHTML = html;
