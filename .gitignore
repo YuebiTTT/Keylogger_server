@@ -1,7 +1,4 @@
-
 logs/
 node_modules/
 node_modules/.package-lock.json
 known_clients.json
-.env*
-.env.example*
