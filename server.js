@@ -18,7 +18,7 @@ const crypto = require('crypto');
 
 // 生成自签名证书的工具函数
 function generateSelfSignedCert() {
-    const { execSync } = require('child_process');
+    const { execSync, spawnSync } = require('child_process');
     const certsDir = './certs';
     
     if (!fs.existsSync(certsDir)) {
@@ -29,9 +29,14 @@ function generateSelfSignedCert() {
     const certPath = path.join(certsDir, 'server.crt');
     
     if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
+        const check = spawnSync('openssl', ['version'], { stdio: 'ignore' });
+        if (check.error || check.status !== 0) {
+            logger.warn('当前系统未检测到 OpenSSL，无法自动生成自签名证书，请手动提供证书文件');
+            return;
+        }
+
         try {
             logger.info('生成自签名 SSL 证书...');
-            // 使用 OpenSSL 生成证书
             execSync(`openssl req -x509 -newkey rsa:4096 -keyout "${keyPath}" -out "${certPath}" -days 365 -nodes -subj "/C=CN/ST=State/L=City/O=Organization/CN=localhost"`, { stdio: 'inherit' });
             logger.info('SSL 证书生成完成');
         } catch (error) {
@@ -203,7 +208,7 @@ const asyncHandler = (fn) => (req, res, next) => {
 // 初始化 Express
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+let wss;
 
 app.use(cors());
 app.use(express.json());
@@ -235,7 +240,14 @@ app.post('/api/login', asyncHandler(async (req, res) => {
     
     if (password === AUTH_CONFIG.password) {
         const token = createAuthToken();
-        res.setHeader('Set-Cookie', `${AUTH_CONFIG.cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${AUTH_CONFIG.maxAge / 1000}`);
+        const secure = process.env.HTTPS_ENABLED === 'true';
+        res.cookie(AUTH_CONFIG.cookieName, token, {
+            path: '/',
+            httpOnly: true,
+            sameSite: 'Strict',
+            maxAge: AUTH_CONFIG.maxAge,
+            secure
+        });
         auditLogger.info('用户登录成功', { user: 'admin', action: 'login', ip: clientIP });
         return res.json({ success: true });
     }
@@ -245,7 +257,13 @@ app.post('/api/login', asyncHandler(async (req, res) => {
 }));
 
 app.get('/logout', (req, res) => {
-    res.setHeader('Set-Cookie', `${AUTH_CONFIG.cookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
+    const secure = process.env.HTTPS_ENABLED === 'true';
+    res.clearCookie(AUTH_CONFIG.cookieName, {
+        path: '/',
+        httpOnly: true,
+        sameSite: 'Strict',
+        secure
+    });
     res.redirect('/login');
 });
 
@@ -264,7 +282,7 @@ function userMiddleware(req, res, next) {
 }
 
 app.use(userMiddleware);
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Alist 客户端
 class AlistClient {
@@ -1086,8 +1104,7 @@ function getClientInfoById(clientId) {
     return { exists: false };
 }
 
-// WebSocket 处理
-wss.on('connection', (ws, req) => {
+function handleWebSocketConnection(ws, req) {
     const cookies = parseCookies(req.headers.cookie || '');
     if (!verifyAuthToken(cookies[AUTH_CONFIG.cookieName])) {
         logger.warn('拒绝未授权的 WebSocket 连接');
@@ -1180,7 +1197,7 @@ wss.on('connection', (ws, req) => {
         logger.info('Web 客户端已断开');
         clientManager.removeWebClient(ws);
     });
-});
+}
 
 // HTTP API
 app.get('/api/clients', (req, res) => {
@@ -1370,7 +1387,11 @@ app.post('/api/batch/command', asyncHandler(async (req, res) => {
     auditLogger.info(`批量命令执行: ${clientIds.length} 个客户端`, { user: req.user, action: 'batch_command', command: JSON.stringify(command), clientCount: clientIds.length });
     logger.info(`批量命令执行: ${clientIds.length} 个客户端`, { command: JSON.stringify(command), user: req.user || 'unknown' });
 
-    const results = await clientManager.broadcastCommand(command);
+    const sendLimit = pLimit(10);
+    const results = await Promise.all(clientIds.map(clientId => sendLimit(async () => {
+        const result = await clientManager.sendCommand(clientId, command);
+        return { clientId, ...result };
+    })));
     const successCount = results.filter(r => r.success).length;
 
     auditLogger.info(`批量命令完成: ${successCount}/${clientIds.length} 个客户端执行成功`, { user: req.user, action: 'batch_command_complete', total: clientIds.length, successCount });
@@ -1560,10 +1581,8 @@ function parsePassword(password) {
         } else {
             // 普通字符，根据当前大小写状态处理
             let char = password[i];
-            if (capsLock) {
+            if (capsLock && /[a-zA-Z]/.test(char)) {
                 char = char.toUpperCase();
-            } else {
-                char = char.toLowerCase();
             }
             result += char;
             i++;
@@ -1697,103 +1716,8 @@ async function shutdown() {
         }
         
         // 重新创建 WebSocket 服务器以使用 HTTPS 服务器
-        const wssInstance = new WebSocket.Server({ server: serverInstance });
-        
-        // 重新绑定 WebSocket 事件处理
-        wssInstance.on('connection', (ws, req) => {
-            const cookies = parseCookies(req.headers.cookie || '');
-            if (!verifyAuthToken(cookies[AUTH_CONFIG.cookieName])) {
-                logger.warn('拒绝未授权的 WebSocket 连接');
-                ws.close(1008, 'Unauthorized');
-                return;
-            }
-
-            logger.info('Web 客户端已连接');
-            clientManager.addWebClient(ws);
-
-            ws.on('message', async (message) => {
-                try {
-                    const data = JSON.parse(message);
-                    switch (data.type) {
-                        case 'command':
-                            const result = await clientManager.sendCommand(data.clientId, data.command);
-                            ws.send(JSON.stringify({ type: 'command_result', result }));
-                            break;
-
-                        case 'broadcast_command':
-                            const results = await clientManager.broadcastCommand(data.command);
-                            ws.send(JSON.stringify({ type: 'broadcast_result', results }));
-                            break;
-
-                        case 'scan_network':
-                            try {
-                                const found = await clientManager.scanNetwork(
-                                    data.startIp,
-                                    data.endIp,
-                                    data.ports || CONFIG.scanPorts
-                                );
-                                ws.send(JSON.stringify({ type: 'scan_complete', found }));
-                            } catch (e) {
-                                ws.send(JSON.stringify({ type: 'scan_error', message: e.message }));
-                            }
-                            break;
-
-                        case 'manual_connect':
-                            try {
-                                const client = await clientManager.manualConnect(data.ip, data.port);
-                                if (client) {
-                                    ws.send(JSON.stringify({ type: 'connect_result', client }));
-                                } else {
-                                    ws.send(JSON.stringify({ 
-                                        type: 'connect_error', 
-                                        message: `无法连接到 ${data.ip}:${data.port}，请检查目标主机是否在线且端口可访问` 
-                                    }));
-                                }
-                            } catch (e) {
-                                ws.send(JSON.stringify({ type: 'connect_error', message: e.message }));
-                            }
-                            break;
-
-                        case 'disconnect_client':
-                            const client = clientManager.clients.get(data.clientId);
-                            if (client) {
-                                client.socket.end();
-                                clientManager.clients.delete(data.clientId);
-                            }
-                            ws.send(JSON.stringify({ type: 'disconnected', clientId: data.clientId }));
-                            break;
-
-                        case 'delete_client':
-                            try {
-                                await clientManager.deleteKnownClient(data.clientId);
-                                ws.send(JSON.stringify({
-                                    type: 'delete_result',
-                                    success: true,
-                                    clientId: data.clientId
-                                }));
-                            } catch (e) {
-                                ws.send(JSON.stringify({
-                                    type: 'delete_result',
-                                    success: false,
-                                    clientId: data.clientId,
-                                    error: e.message
-                                }));
-                            }
-                            break;
-
-                        default:
-                            ws.send(JSON.stringify({ type: 'error', message: '未知的命令类型' }));
-                    }
-                } catch (e) {
-                    ws.send(JSON.stringify({ type: 'error', message: e.message }));
-                }
-            });
-
-            ws.on('close', () => {
-                logger.info('Web 客户端已断开');
-                clientManager.removeWebClient(ws);
-            });
-        });
+        wss = new WebSocket.Server({ server: serverInstance });
+        wss.on('connection', handleWebSocketConnection);
         
         serverInstance.listen(port, () => {
             logger.info(`${protocol.toUpperCase()} 服务运行在端口 ${port}`);
