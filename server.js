@@ -1616,7 +1616,6 @@ app.get('/api/extract-passwords/view', asyncHandler(async (req, res) => {
 }));
 
 // 解析包含特殊键的密码字符串
-// 解析包含特殊键的密码字符串（修正版）
 function parsePassword(raw) {
     let result = '';
     let capsLock = false;     // 大小写锁定状态
