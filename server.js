@@ -540,6 +540,27 @@ async function executeWithRetry(sql, params, retries = CONFIG.db.maxRetries) {
     throw lastError;
 }
 
+function normalizePassword(password) {
+    return String(password || '').trim();
+}
+
+function hashPassword(password) {
+    return crypto.createHash('sha256').update(normalizePassword(password)).digest('hex');
+}
+
+async function initBlacklistTable() {
+    await executeWithRetry(
+        `CREATE TABLE IF NOT EXISTS password_blacklist (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            password_hash CHAR(64) NOT NULL UNIQUE,
+            password TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;`,
+        []
+    );
+}
+
+
 async function initDatabase() {
     try {
         await executeWithRetry(`
@@ -1440,6 +1461,14 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
             return res.json({ success: true, count: 0 });
         }
 
+        let blacklistedHashes = new Set();
+        try {
+            const blacklistedRows = await executeWithRetry('SELECT password_hash FROM password_blacklist', []);
+            blacklistedRows.forEach(row => blacklistedHashes.add(row.password_hash));
+        } catch (error) {
+            logger.warn('读取密码黑名单失败，继续提取密码', { error: error.message });
+        }
+
         // 使用队列异步处理文件，避免阻塞主线程
         const extractLimit = pLimit(20); // 限制并发数为20
         const extractTasks = logFiles.map(file => extractLimit(async () => {
@@ -1466,11 +1495,16 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
             return res.json({ success: true, count: 0 });
         }
 
+        const filteredPasswords = extractedPasswords.filter(item => !blacklistedHashes.has(hashPassword(item.password)));
+        if (filteredPasswords.length === 0) {
+            return res.json({ success: true, count: 0 });
+        }
+
         // 去重：根据密码内容去重
         const uniquePasswords = [];
         const seenPasswords = new Set();
 
-        for (const item of extractedPasswords) {
+        for (const item of filteredPasswords) {
             if (!seenPasswords.has(item.password)) {
                 seenPasswords.add(item.password);
                 uniquePasswords.push(item);
@@ -1509,6 +1543,54 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
         logger.error('提取密码失败', { error: error.message });
         res.status(500).json({ error: '提取密码失败' });
     }
+}));
+
+app.post('/api/blacklist', asyncHandler(async (req, res) => {
+    const { password } = req.body;
+    if (!password || typeof password !== 'string' || !password.trim()) {
+        return res.status(400).json({ error: '密码不能为空' });
+    }
+
+    const normalizedPassword = normalizePassword(password);
+    const passwordHash = hashPassword(normalizedPassword);
+
+    await executeWithRetry(
+        'INSERT IGNORE INTO password_blacklist (password_hash, password) VALUES (?, ?)',
+        [passwordHash, normalizedPassword]
+    );
+
+    res.json({ success: true });
+}));
+
+app.get('/api/blacklist', asyncHandler(async (req, res) => {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(5, parseInt(req.query.limit, 10) || 20));
+    const offset = (page - 1) * limit;
+
+    const totalCountRows = await executeWithRetry('SELECT COUNT(*) AS total FROM password_blacklist', []);
+    const total = Array.isArray(totalCountRows) && totalCountRows[0] ? totalCountRows[0].total : 0;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+
+    const rows = await executeWithRetry(
+        'SELECT id, password, password_hash, created_at FROM password_blacklist ORDER BY created_at DESC LIMIT ? OFFSET ?',
+        [limit, offset]
+    );
+
+    res.json({ success: true, blacklist: rows, total, page, limit, totalPages });
+}));
+
+app.delete('/api/blacklist/:id', asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ success: false, error: '非法的黑名单 ID' });
+    }
+
+    const result = await executeWithRetry('DELETE FROM password_blacklist WHERE id = ?', [id]);
+    if (result.affectedRows === 0) {
+        return res.status(404).json({ success: false, error: '黑名单项不存在' });
+    }
+
+    res.json({ success: true });
 }));
 
 app.get('/api/extract-passwords/view', asyncHandler(async (req, res) => {
@@ -1686,6 +1768,7 @@ async function shutdown() {
 // 启动服务
 (async () => {
     try {
+        await initBlacklistTable();
         await clientManager.init();
         
         const httpsEnabled = process.env.HTTPS_ENABLED === 'true';
@@ -1694,8 +1777,8 @@ async function shutdown() {
         let port = CONFIG.httpPort;
         
         if (httpsEnabled) {
-            const keyPath = process.env.HTTPS_KEY_PATH || './certs/server.key';
-            const certPath = process.env.HTTPS_CERT_PATH || './certs/server.crt';
+            const keyPath = process.env.HTTPS_KEY_PATH
+            const certPath = process.env.HTTPS_CERT_PATH
             
             // 如果证书不存在，尝试生成自签名证书
             if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {

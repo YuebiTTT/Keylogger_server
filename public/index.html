@@ -992,6 +992,9 @@
             <div class="nav-item" data-page="logs">
                 <i class="fas fa-file-alt"></i> 日志文件
             </div>
+            <div class="nav-item" data-page="blacklist">
+                <i class="fas fa-ban"></i> 黑名单管理
+            </div>
             <div class="nav-item" data-page="settings">
                 <i class="fas fa-cog"></i> 系统设置
             </div>
@@ -1087,6 +1090,44 @@
                             </tr>
                         </tbody>
                     </table>
+                </div>
+            </div>
+
+            <!-- 黑名单管理页面 -->
+            <div id="blacklistPage" class="page" style="display: none;">
+                <div class="toolbar">
+                    <input type="text" id="blacklistSearch" placeholder="搜索屏蔽密码..." style="flex: 1; max-width: 300px;">
+                    <button class="btn btn-primary" onclick="loadBlacklist()">
+                        <i class="fas fa-sync-alt"></i> 刷新
+                    </button>
+                </div>
+
+                <div class="card">
+                    <h3>已屏蔽密码</h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>密码</th>
+                                <th>创建时间</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="blacklistTable">
+                            <tr>
+                                <td colspan="4" class="empty-state">暂无屏蔽密码</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div class="toolbar" style="justify-content: flex-end; gap: 0.5rem; margin-top: 0.75rem; align-items: center;">
+                        <button class="btn btn-secondary" onclick="changeBlacklistPage(-1)">
+                            <i class="fas fa-chevron-left"></i> 上一页
+                        </button>
+                        <span id="blacklistPagerInfo" style="color: var(--gray);">第 1 页 / 1 页</span>
+                        <button class="btn btn-secondary" onclick="changeBlacklistPage(1)">
+                            下一页 <i class="fas fa-chevron-right"></i>
+                        </button>
+                    </div>
                 </div>
             </div>
 
@@ -1235,10 +1276,11 @@
                 </div>
             </div>
             <div class="extract-container" style="overflow: hidden; display: flex; flex-direction: column; height: calc(80vh - 120px);">
-                <div class="extract-header" style="display: grid; grid-template-columns: 60px 1fr 1fr 200px; padding: 1rem; background: var(--light); border-bottom: 1px solid var(--gray-light); font-weight: 600; color: var(--dark);">
+                <div class="extract-header" style="display: grid; grid-template-columns: 60px 1fr 1fr 120px 150px; padding: 1rem; background: var(--light); border-bottom: 1px solid var(--gray-light); font-weight: 600; color: var(--dark);">
                     <div>序号</div>
                     <div>密码内容</div>
                     <div>来源文件</div>
+                    <div>操作</div>
                     <div>时间戳</div>
                 </div>
                 <div class="extract-list" id="extractList" style="flex: 1; overflow-y: auto;"></div>

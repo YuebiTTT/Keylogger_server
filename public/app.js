@@ -9,6 +9,10 @@ let isUnloading = false;
 let isReconnecting = false;
 let reconnectAttempts = 0;
 let connectingClients = new Set();
+let currentExtractedPasswords = [];
+let blacklistPage = 1;
+let blacklistPageSize = 20;
+let blacklistTotalPages = 1;
 const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
 let autoRefreshTimer = null;
 const AUTO_REFRESH_INTERVAL = 1000; // 1秒
@@ -24,6 +28,10 @@ const dom = {
     scanProgress: document.getElementById('scanProgress'),
     toast: document.getElementById('toast')
 };
+
+function normalizePassword(value) {
+    return String(value || '').trim();
+}
 
 function escapeHtml(value) {
     return String(value || '')
@@ -46,6 +54,10 @@ document.querySelectorAll('.nav-item').forEach(item => {
             populateClientSelect();
             refreshLogs();
             startAutoRefresh();
+        } else if (page === 'blacklist') {
+            blacklistPage = 1;
+            loadBlacklist();
+            stopAutoRefresh();
         } else {
             stopAutoRefresh();
         }
@@ -720,6 +732,78 @@ function saveSettings() {
     showToast(`设置已保存 (心跳: ${interval}ms, 超时: ${timeout}ms)`, 'success');
 }
 
+async function loadBlacklist(page = 1) {
+    try {
+        blacklistPage = page;
+        const response = await fetch(`/api/blacklist?page=${blacklistPage}&limit=${blacklistPageSize}`);
+        if (!response.ok) {
+            throw new Error('加载黑名单失败');
+        }
+
+        const data = await response.json();
+        const rows = data.blacklist || [];
+        blacklistTotalPages = data.totalPages || 1;
+        blacklistPage = data.page || blacklistPage;
+        const table = document.getElementById('blacklistTable');
+        if (rows.length === 0) {
+            table.innerHTML = `<tr><td colspan="4" class="empty-state">暂无屏蔽密码</td></tr>`;
+        } else {
+            let html = '';
+            rows.forEach(row => {
+                html += `
+                    <tr data-id="${row.id}">
+                        <td>${row.id}</td>
+                        <td>${escapeHtml(row.password)}</td>
+                        <td>${escapeHtml(row.created_at)}</td>
+                        <td>
+                            <button class="btn btn-sm btn-danger" onclick="deleteBlacklistEntry(${row.id})">
+                                <i class="fas fa-trash"></i> 删除
+                            </button>
+                        </td>
+                    </tr>
+                `;
+            });
+            table.innerHTML = html;
+        }
+
+        document.getElementById('blacklistPagerInfo').textContent = `第 ${blacklistPage} 页 / ${blacklistTotalPages} 页`;
+    } catch (e) {
+        console.error('加载黑名单失败:', e);
+        showToast('加载黑名单失败', 'error');
+    }
+}
+
+function changeBlacklistPage(delta) {
+    const targetPage = blacklistPage + delta;
+    if (targetPage < 1 || targetPage > blacklistTotalPages) {
+        return;
+    }
+    loadBlacklist(targetPage);
+}
+
+async function deleteBlacklistEntry(id) {
+    if (!confirm('确认删除该屏蔽密码？此操作不可恢复。')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/blacklist/${id}`, {
+            method: 'DELETE'
+        });
+        const result = await response.json();
+
+        if (!response.ok || !result.success) {
+            throw new Error(result.error || '删除失败');
+        }
+
+        showToast('已删除黑名单项', 'success');
+        loadBlacklist();
+    } catch (e) {
+        console.error('删除黑名单失败:', e);
+        showToast(e.message || '删除黑名单失败', 'error');
+    }
+}
+
 // Toast 提示
 function showToast(message, type = 'success') {
     const icon = type === 'success' ? '<i class="fas fa-check-circle"></i>' : '<i class="fas fa-exclamation-circle"></i>';
@@ -747,6 +831,15 @@ dom.logClientSelect.addEventListener('change', () => {
 document.getElementById('logSearch')?.addEventListener('input', (e) => {
     const keyword = e.target.value.toLowerCase();
     const rows = dom.logsTable.querySelectorAll('tr');
+    rows.forEach(row => {
+        const text = row.textContent.toLowerCase();
+        row.style.display = text.includes(keyword) ? '' : 'none';
+    });
+});
+
+document.getElementById('blacklistSearch')?.addEventListener('input', (e) => {
+    const keyword = e.target.value.toLowerCase();
+    const rows = document.querySelectorAll('#blacklistTable tr');
     rows.forEach(row => {
         const text = row.textContent.toLowerCase();
         row.style.display = text.includes(keyword) ? '' : 'none';
@@ -798,7 +891,19 @@ async function viewLatestPasswords() {
             console.log('提取结果内容长度:', content.length);
             
             // 解析提取结果
-            const passwords = parseExtractedPasswords(content);
+            let passwords = parseExtractedPasswords(content);
+            
+            // 获取黑名单并过滤当前提取结果
+            try {
+                const blacklistResponse = await fetch('/api/blacklist');
+                if (blacklistResponse.ok) {
+                    const data = await blacklistResponse.json();
+                    const blacklistSet = new Set((data.blacklist || []).map(item => normalizePassword(item.password)));
+                    passwords = passwords.filter(item => !blacklistSet.has(normalizePassword(item.password)));
+                }
+            } catch (e) {
+                console.warn('获取黑名单失败，继续显示提取结果', e);
+            }
             
             // 显示提取结果
             displayExtractedPasswords(passwords);
@@ -918,15 +1023,21 @@ function displayExtractedPasswords(passwords) {
                         ${escapeHtml(item.file)}
                     </a>
                 </div>
+                <div class="action-cell">
+                    <button class="btn btn-sm btn-secondary blacklist-password-btn" data-index="${index}" style="padding: 0.35rem 0.75rem; min-width: 110px;">
+                        不再显示
+                    </button>
+                </div>
                 <div class="timestamp">${escapeHtml(item.timestamp)}</div>
             </div>
         `;
     });
     
+    currentExtractedPasswords = passwords;
     extractList.innerHTML = html;
     
     // 添加点击事件处理程序
-    extractList.addEventListener('click', function(e) {
+    extractList.onclick = async function(e) {
         const link = e.target.closest('.source-file-link');
         if (link) {
             const clientId = link.dataset.clientId;
@@ -934,8 +1045,17 @@ function displayExtractedPasswords(passwords) {
             const password = link.dataset.password;
             const rawPassword = link.dataset.rawPassword;
             viewLogWithPassword(clientId, filename, password, rawPassword);
+            return;
         }
-    });
+
+        const button = e.target.closest('.blacklist-password-btn');
+        if (button) {
+            const index = Number(button.dataset.index);
+            const itemElement = button.closest('.extract-item');
+            const password = currentExtractedPasswords[index] ? currentExtractedPasswords[index].password : '';
+            await blacklistExtractedPassword(itemElement, password);
+        }
+    };
     
     // 添加搜索功能
     const searchInput = document.getElementById('extractSearch');
@@ -956,11 +1076,39 @@ function displayExtractedPasswords(passwords) {
     };
 }
 
-// 转义HTML字符
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+async function blacklistExtractedPassword(itemElement, password) {
+    if (!password) {
+        showToast('无法加入黑名单：密码内容为空', 'error');
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/blacklist', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ password })
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.error || '加入黑名单失败');
+        }
+
+        if (itemElement) {
+            itemElement.remove();
+            currentExtractedPasswords = currentExtractedPasswords.filter(item => normalizePassword(item.password) !== normalizePassword(password));
+            const extractStats = document.getElementById('extractStats');
+            const currentCount = parseInt(extractStats.textContent.replace(/\D/g, '')) || 0;
+            extractStats.textContent = `共 ${Math.max(currentCount - 1, 0)} 个密码`;
+        }
+
+        showToast('已加入黑名单，后续提取时将跳过该密码', 'success');
+    } catch (e) {
+        console.error('加入黑名单失败:', e);
+        showToast(e.message || '加入黑名单失败', 'error');
+    }
 }
 
 // 页面关闭前清理定时器
