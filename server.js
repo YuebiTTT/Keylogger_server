@@ -1519,7 +1519,6 @@ const extractionCache = {
 
 // ========== 密码提取核心函数 ==========
 
-// 将一行文本拆分为 tokens：特殊键整体保留，普通字符逐字拆分
 function splitLineIntoTokens(line) {
     const tokens = [];
     const regex = /\[[^\]]+\]|./g;
