@@ -1313,8 +1313,9 @@ app.get('/api/update/check', asyncHandler(async (req, res) => {
                 // 比较版本号，找出最新版本
                 let tempLatestVersion = '0.0.0';
                 let latestFilename = '';
+                let latestDir = '';
                 
-                keyloggerFiles.forEach(file => {
+                for (const file of keyloggerFiles) {
                     const match = file.filename.match(/^Keylogger(_v(\d+\.\d+\.\d+))?\.exe$/i);
                     if (match) {
                         const version = match[2] || '1.0.0';
@@ -1323,12 +1324,43 @@ app.get('/api/update/check', asyncHandler(async (req, res) => {
                             latestFilename = file.filename;
                         }
                     }
-                });
+                }
                 
-                if (tempLatestVersion !== '0.0.0') {
+                // 找到最新版本后，确定其所在目录
+                if (latestFilename) {
+                    for (const dir of possibleDirs) {
+                        try {
+                            const dirFiles = await alistClient.listFiles(dir);
+                            if (dirFiles.some(f => f.filename === latestFilename)) {
+                                latestDir = dir;
+                                break;
+                            }
+                        } catch (error) {
+                            // 忽略错误
+                        }
+                    }
+                }
+                
+                if (tempLatestVersion !== '0.0.0' && latestDir) {
                     latestVersion = tempLatestVersion;
-                    downloadUrl = `http://10.88.202.73:5244/%E5%AD%A6%E7%94%9F%E7%9B%AE%E5%BD%95/%E8%BD%AF%E4%BB%B6/%E9%94%AE%E7%9B%98%E8%AE%B0%E5%BD%95%E5%99%A8/${encodeURIComponent(latestFilename)}`;
-                    logger.info(`找到最新版本: ${latestVersion}, 文件名: ${latestFilename}, 下载链接: ${downloadUrl}`);
+                    // 构建完整文件路径
+                    const filePath = `${latestDir}/${latestFilename}`;
+                    try {
+                        // 获取文件的原始下载链接
+                        const fileInfo = await alistClient._request('GET', `/api/fs/get?path=${encodeURIComponent(filePath)}`);
+                        if (fileInfo.code === 200 && fileInfo.data && fileInfo.data.raw_url) {
+                            downloadUrl = fileInfo.data.raw_url;
+                            logger.info(`找到最新版本: ${latestVersion}, 文件名: ${latestFilename}, 直接下载链接: ${downloadUrl}`);
+                        } else {
+                            // 如果获取raw_url失败，使用默认构造的链接
+                            downloadUrl = `http://10.88.202.73:5244/%E5%AD%A6%E7%94%9F%E7%9B%AE%E5%BD%95/%E8%BD%AF%E4%BB%B6/%E9%94%AE%E7%9B%98%E8%AE%B0%E5%BD%95%E5%99%A8/${encodeURIComponent(latestFilename)}`;
+                            logger.warn(`获取raw_url失败，使用默认链接: ${downloadUrl}`);
+                        }
+                    } catch (error) {
+                        // 如果获取raw_url失败，使用默认构造的链接
+                        downloadUrl = `http://10.88.202.73:5244/%E5%AD%A6%E7%94%9F%E7%9B%AE%E5%BD%95/%E8%BD%AF%E4%BB%B6/%E9%94%AE%E7%9B%98%E8%AE%B0%E5%BD%95%E5%99%A8/${encodeURIComponent(latestFilename)}`;
+                        logger.warn(`获取raw_url失败: ${error.message}, 使用默认链接: ${downloadUrl}`);
+                    }
                 }
             } else {
                 logger.info('未找到 Keylogger 可执行文件');
