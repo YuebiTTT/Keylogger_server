@@ -1185,6 +1185,18 @@
                     </button>
                 </div>
                 <div class="card">
+                    <h3>客户端版本管理</h3>
+                    <div class="form-group">
+                        <button class="btn btn-primary" onclick="loadVersions()">
+                            <i class="fas fa-sync"></i> 刷新版本列表
+                        </button>
+                        <button class="btn btn-success" onclick="showAddVersionModal()">
+                            <i class="fas fa-plus"></i> 添加版本
+                        </button>
+                    </div>
+                    <div id="versionsTable"></div>
+                </div>
+                <div class="card">
                     <h3>关于</h3>
                     <div style="margin-bottom: 1rem;">
                         <p><strong>系统版本:</strong> 1.0.0</p>
@@ -1297,6 +1309,65 @@
             <div class="tab-content" id="logsTab">
                 <div id="clientLogs"></div>
             </div>
+        </div>
+    </div>
+
+    <!-- 添加版本模态框 -->
+    <div class="modal" id="addVersionModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>添加版本</h3>
+                <button class="close-btn" onclick="hideModal('addVersionModal')">&times;</button>
+            </div>
+            <div class="form-group">
+                <label>版本号</label>
+                <input type="text" id="versionNumber" placeholder="例如: 1.0.1" required>
+            </div>
+            <div class="form-group">
+                <label>下载链接</label>
+                <input type="url" id="versionUrl" placeholder="例如: http://example.com/download.exe" required>
+            </div>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="isActiveVersion"> 设置为当前激活版本
+                </label>
+            </div>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="forceUpdate"> 强制更新
+                </label>
+            </div>
+            <button class="btn btn-primary" onclick="addVersion()">添加版本</button>
+        </div>
+    </div>
+
+    <!-- 编辑版本模态框 -->
+    <div class="modal" id="editVersionModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>编辑版本</h3>
+                <button class="close-btn" onclick="hideModal('editVersionModal')">&times;</button>
+            </div>
+            <input type="hidden" id="editVersionId">
+            <div class="form-group">
+                <label>版本号</label>
+                <input type="text" id="editVersionNumber" placeholder="例如: 1.0.1" required>
+            </div>
+            <div class="form-group">
+                <label>下载链接</label>
+                <input type="url" id="editVersionUrl" placeholder="例如: http://example.com/download.exe" required>
+            </div>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="editIsActiveVersion"> 设置为当前激活版本
+                </label>
+            </div>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="editForceUpdate"> 强制更新
+                </label>
+            </div>
+            <button class="btn btn-primary" onclick="updateVersion()">更新版本</button>
         </div>
     </div>
 
