@@ -30,7 +30,10 @@ const dom = {
 };
 
 function normalizePassword(value) {
-    return String(value || '').trim();
+    if (!value) return '';
+    let normalized = String(value).trim();
+    // 移除所有空格和换行符
+    normalized = normalized.replace(/\s+/g, '');
 }
 
 function escapeHtml(value) {

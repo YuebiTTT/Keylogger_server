@@ -34,9 +34,12 @@ async function loadBlacklistCache() {
     }
     
     try {
-        const blacklistedRows = await executeWithRetry('SELECT password_hash FROM password_blacklist', []);
+        const blacklistedRows = await executeWithRetry('SELECT password_hash, password FROM password_blacklist', []);
         blacklistCache.clear();
-        blacklistedRows.forEach(row => blacklistCache.set(row.password_hash, true));
+        blacklistedRows.forEach(row => {
+            const normalizedPwd = normalizePassword(row.password);
+            blacklistCache.set(row.password_hash, normalizedPwd);
+        });
         blacklistLastUpdate = now;
         logger.debug(`黑名单缓存已更新，共 ${blacklistedRows.length} 个条目`);
     } catch (error) {
@@ -44,8 +47,26 @@ async function loadBlacklistCache() {
     }
 }
 
-function isPasswordBlacklisted(passwordHash) {
-    return blacklistCache.has(passwordHash);
+function isPasswordBlacklisted(password) {
+    const normalizedPwd = normalizePassword(password);
+    if (!normalizedPwd) return false;
+    
+    // 检查完全匹配
+    const pwdHash = hashPassword(normalizedPwd);
+    if (blacklistCache.has(pwdHash)) {
+        logger.debug(`密码完全匹配黑名单: ${normalizedPwd}`);
+        return true;
+    }
+    
+    // 检查包含匹配：如果黑名单密码是当前密码的子串（长度>=3的密码）
+    for (const blacklistedPwd of blacklistCache.values()) {
+        if (blacklistedPwd && blacklistedPwd.length >= 3 && normalizedPwd.includes(blacklistedPwd)) {
+            logger.debug(`密码包含黑名单项: ${normalizedPwd} 包含 ${blacklistedPwd}`);
+            return true;
+        }
+    }
+    
+    return false;
 }
 
 // ========== 工具函数：生成自签名证书 ==========
@@ -1949,7 +1970,6 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
 
     // 加载黑名单缓存
     await loadBlacklistCache();
-    const blacklistedHashes = new Set(blacklistCache.keys());
 
     const extractLimit = pLimit(CONFIG.extractConcurrency);
     const extractTasks = filesToProcess.map(file => extractLimit(async () => {
@@ -1977,8 +1997,7 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
 
     let allPasswords = [...cachedPasswordsFromUnchangedFiles, ...newPasswords];
     const filteredPasswords = allPasswords.filter(item => {
-        const hash = hashPassword(item.password);
-        return !blacklistedHashes.has(hash);
+        return !isPasswordBlacklisted(item.password);
     });
 
     const uniquePasswords = [];
@@ -2016,6 +2035,24 @@ app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
     res.json({ success: true, count: uniquePasswords.length });
 }));
 
+app.post('/api/blacklist/test', asyncHandler(async (req, res) => {
+    const { password } = req.body;
+    if (!password || typeof password !== 'string') {
+        return res.status(400).json({ error: '密码不能为空' });
+    }
+    
+    await loadBlacklistCache();
+    const isBlacklisted = isPasswordBlacklisted(password);
+    const normalized = normalizePassword(password);
+    
+    res.json({ 
+        success: true, 
+        password: password,
+        normalized: normalized,
+        isBlacklisted: isBlacklisted
+    });
+}));
+
 app.post('/api/blacklist', asyncHandler(async (req, res) => {
     const { password } = req.body;
     if (!password || typeof password !== 'string' || !password.trim()) {
@@ -2028,7 +2065,8 @@ app.post('/api/blacklist', asyncHandler(async (req, res) => {
         [passwordHash, normalizedPassword]
     );
     // 更新缓存
-    blacklistCache.set(passwordHash, true);
+    blacklistCache.set(passwordHash, normalizedPassword);
+    logger.debug('添加黑名单: ' + normalizedPassword);
     res.json({ success: true });
 }));
 
@@ -2061,6 +2099,7 @@ app.delete('/api/blacklist/:id', asyncHandler(async (req, res) => {
     
     // 从缓存中移除
     blacklistCache.delete(rows[0].password_hash);
+    logger.debug(`删除黑名单: ${normalizePassword(rows[0].password)}`);
     res.json({ success: true });
 }));
 
