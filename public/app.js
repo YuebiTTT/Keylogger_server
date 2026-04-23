@@ -647,15 +647,17 @@ async function viewLogWithPassword(clientId, filename, password, rawPassword) {
         let highlightedContent = content;
         
         if (rawPassword) {
-            // 仅高亮原始按键序列
+            // 仅高亮原始按键序列，转义正则特殊字符
+            const escapedRawPassword = rawPassword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             highlightedContent = highlightedContent.replace(
-                new RegExp(rawPassword, 'g'), 
+                new RegExp(escapedRawPassword, 'g'), 
                 `<span class="raw-password-highlight">${rawPassword}</span>`
             );
         } else {
-            // 如果没有原始数据，才高亮解析后的密码（兜底）
+            // 如果没有原始数据，才高亮解析后的密码（兜底），转义正则特殊字符
+            const escapedPassword = password.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             highlightedContent = highlightedContent.replace(
-                new RegExp(password, 'g'), 
+                new RegExp(escapedPassword, 'g'), 
                 `<span class="password-highlight">${password}</span>`
             );
         }
