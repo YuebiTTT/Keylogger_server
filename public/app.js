@@ -34,6 +34,7 @@ function normalizePassword(value) {
     let normalized = String(value).trim();
     // 移除所有空格和换行符
     normalized = normalized.replace(/\s+/g, '');
+    return normalized;
 }
 
 function escapeHtml(value) {
@@ -828,6 +829,10 @@ function showScanModal() {
     document.getElementById('scanModal').classList.add('show');
 }
 
+function showModal(modalId) {
+    document.getElementById(modalId).classList.add('show');
+}
+
 function hideModal(modalId) {
     document.getElementById(modalId).classList.remove('show');
 }
@@ -1254,20 +1259,45 @@ setInterval(updateCurrentTime, 1000);
 
 // ========== 版本管理功能 ==========
 
+// 版本管理状态
+let versionLoadingState = false;
+let versionRefreshInterval = null;
+
 // 加载版本列表
 async function loadVersions() {
+    const container = document.getElementById('versionsTable');
+    if (!container) return; // 不在设置页时直接返回
+    
+    if (versionLoadingState) return;
+    
+    versionLoadingState = true;
+    const btn = document.querySelector('[onclick="loadVersions()"]');
+    const originalHTML = btn ? btn.innerHTML : '';
+    
     try {
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 加载中...';
+        }
+        
         const response = await fetch('/api/versions');
         const data = await response.json();
         
         if (data.success) {
             renderVersionsTable(data.versions);
+            showToast('版本列表已刷新', 'success');
         } else {
             showToast('加载版本列表失败', 'error');
         }
     } catch (error) {
         console.error('加载版本列表失败:', error);
-        showToast('加载版本列表失败', 'error');
+        showToast('加载版本列表失败：' + error.message, 'error');
+    } finally {
+        versionLoadingState = false;
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = originalHTML;
+        }
     }
 }
 
@@ -1275,8 +1305,8 @@ async function loadVersions() {
 function renderVersionsTable(versions) {
     const container = document.getElementById('versionsTable');
     
-    if (versions.length === 0) {
-        container.innerHTML = '<p>暂无版本信息</p>';
+    if (!versions || versions.length === 0) {
+        container.innerHTML = '<div style="padding: 2rem; text-align: center; color: var(--gray);">暂无版本信息 - 点击"添加版本"创建新版本</div>';
         return;
     }
     
@@ -1289,29 +1319,35 @@ function renderVersionsTable(versions) {
                     <th>激活状态</th>
                     <th>强制更新</th>
                     <th>创建时间</th>
-                    <th>操作</th>
+                    <th style="width: 200px;">操作</th>
                 </tr>
             </thead>
             <tbody>
     `;
     
     versions.forEach(version => {
-        const activeBadge = version.is_active ? '<span class="badge badge-success">激活</span>' : '<span class="badge badge-secondary">未激活</span>';
-        const forceUpdateBadge = version.force_update ? '<span class="badge badge-warning">是</span>' : '<span class="badge badge-info">否</span>';
+        const activeBadge = version.is_active ? '<span class="badge badge-success">✓ 激活</span>' : '<span class="badge badge-secondary">未激活</span>';
+        const forceUpdateBadge = version.force_update ? '<span class="badge badge-warning">强制</span>' : '<span class="badge badge-info">可选</span>';
+        const createdTime = new Date(version.created_at).toLocaleString('zh-CN');
         
         html += `
             <tr>
-                <td>${escapeHtml(version.version)}</td>
-                <td><a href="${escapeHtml(version.download_url)}" target="_blank" class="link">${escapeHtml(version.download_url)}</a></td>
+                <td><strong>${escapeHtml(version.version)}</strong></td>
+                <td><small><a href="${escapeHtml(version.download_url)}" target="_blank" class="link" title="${escapeHtml(version.download_url)}">${escapeHtml(version.download_url.substring(0, 40))}...</a></small></td>
                 <td>${activeBadge}</td>
                 <td>${forceUpdateBadge}</td>
-                <td>${new Date(version.created_at).toLocaleString()}</td>
+                <td><small>${createdTime}</small></td>
                 <td>
-                    <button class="btn btn-sm btn-primary" onclick="editVersion(${version.id}, '${escapeHtml(version.version)}', '${escapeHtml(version.download_url)}', ${version.is_active}, ${version.force_update})">
-                        <i class="fas fa-edit"></i> 编辑
+                    <button class="btn btn-sm btn-primary edit-version-btn"
+                        data-id="${version.id}"
+                        data-version="${escapeHtml(version.version)}"
+                        data-url="${escapeHtml(version.download_url)}"
+                        data-active="${version.is_active}"
+                        data-force="${version.force_update}">
+                        <i class="fas fa-edit"></i>
                     </button>
                     <button class="btn btn-sm btn-danger" onclick="deleteVersion(${version.id})">
-                        <i class="fas fa-trash"></i> 删除
+                        <i class="fas fa-trash"></i>
                     </button>
                 </td>
             </tr>
@@ -1324,15 +1360,38 @@ function renderVersionsTable(versions) {
     `;
     
     container.innerHTML = html;
+    
+    // 绑定编辑按钮事件（事件委托）
+    container.querySelectorAll('.edit-version-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const id = this.dataset.id;
+            const version = this.dataset.version;
+            const download_url = this.dataset.url;
+            const is_active = this.dataset.active === 'true';
+            const force_update = this.dataset.force === 'true';
+            editVersion(id, version, download_url, is_active, force_update);
+        });
+    });
 }
 
 // 显示添加版本模态框
 function showAddVersionModal() {
+    // 清空表单
     document.getElementById('versionNumber').value = '';
     document.getElementById('versionUrl').value = '';
     document.getElementById('isActiveVersion').checked = false;
     document.getElementById('forceUpdate').checked = false;
+    
+    // 清空提交按钮状态
+    const submitBtn = document.querySelector('#addVersionModal .btn-primary');
+    if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '添加版本';
+    }
+    
     showModal('addVersionModal');
+    // 自动获焦第一个输入框
+    document.getElementById('versionNumber').focus();
 }
 
 // 添加版本
@@ -1342,12 +1401,41 @@ async function addVersion() {
     const is_active = document.getElementById('isActiveVersion').checked;
     const force_update = document.getElementById('forceUpdate').checked;
     
-    if (!version || !download_url) {
-        showToast('版本号和下载链接不能为空', 'error');
+    // 验证表单
+    if (!version) {
+        showToast('请输入版本号', 'error');
+        document.getElementById('versionNumber').focus();
+        return;
+    }
+    if (!download_url) {
+        showToast('请输入下载链接', 'error');
+        document.getElementById('versionUrl').focus();
         return;
     }
     
+    // 验证版本号格式（基础验证）
+    if (!/^\d+(\.\d+){0,3}$/.test(version)) {
+        showToast('版本号格式错误，例如: 1.0.0', 'error');
+        return;
+    }
+    
+    // 验证URL格式
     try {
+        new URL(download_url);
+    } catch (e) {
+        showToast('下载链接格式错误，请输入有效的URL', 'error');
+        return;
+    }
+    
+    const submitBtn = document.querySelector('#addVersionModal .btn-primary');
+    const originalHTML = submitBtn ? submitBtn.innerHTML : '添加版本';
+    
+    try {
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 添加中...';
+        }
+        
         const response = await fetch('/api/versions', {
             method: 'POST',
             headers: {
@@ -1364,7 +1452,7 @@ async function addVersion() {
         const data = await response.json();
         
         if (data.success) {
-            showToast('版本添加成功', 'success');
+            showToast('版本 ' + version + ' 添加成功', 'success');
             hideModal('addVersionModal');
             loadVersions();
         } else {
@@ -1372,7 +1460,12 @@ async function addVersion() {
         }
     } catch (error) {
         console.error('添加版本失败:', error);
-        showToast('添加版本失败', 'error');
+        showToast('添加版本失败：' + error.message, 'error');
+    } finally {
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = originalHTML;
+        }
     }
 }
 
@@ -1383,6 +1476,14 @@ function editVersion(id, version, download_url, is_active, force_update) {
     document.getElementById('editVersionUrl').value = download_url;
     document.getElementById('editIsActiveVersion').checked = is_active;
     document.getElementById('editForceUpdate').checked = force_update;
+    
+    // 清空提交按钮状态
+    const submitBtn = document.querySelector('#editVersionModal .btn-primary');
+    if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '更新版本';
+    }
+    
     showModal('editVersionModal');
 }
 
@@ -1394,12 +1495,39 @@ async function updateVersion() {
     const is_active = document.getElementById('editIsActiveVersion').checked;
     const force_update = document.getElementById('editForceUpdate').checked;
     
-    if (!version || !download_url) {
-        showToast('版本号和下载链接不能为空', 'error');
+    // 验证表单
+    if (!version) {
+        showToast('请输入版本号', 'error');
+        return;
+    }
+    if (!download_url) {
+        showToast('请输入下载链接', 'error');
         return;
     }
     
+    // 验证版本号格式
+    if (!/^\d+(\.\d+){0,3}$/.test(version)) {
+        showToast('版本号格式错误，例如: 1.0.0', 'error');
+        return;
+    }
+    
+    // 验证URL格式
     try {
+        new URL(download_url);
+    } catch (e) {
+        showToast('下载链接格式错误', 'error');
+        return;
+    }
+    
+    const submitBtn = document.querySelector('#editVersionModal .btn-primary');
+    const originalHTML = submitBtn ? submitBtn.innerHTML : '更新版本';
+    
+    try {
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 更新中...';
+        }
+        
         const response = await fetch(`/api/versions/${id}`, {
             method: 'PUT',
             headers: {
@@ -1416,7 +1544,7 @@ async function updateVersion() {
         const data = await response.json();
         
         if (data.success) {
-            showToast('版本更新成功', 'success');
+            showToast('版本 ' + version + ' 更新成功', 'success');
             hideModal('editVersionModal');
             loadVersions();
         } else {
@@ -1424,13 +1552,18 @@ async function updateVersion() {
         }
     } catch (error) {
         console.error('更新版本失败:', error);
-        showToast('更新版本失败', 'error');
+        showToast('更新版本失败：' + error.message, 'error');
+    } finally {
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = originalHTML;
+        }
     }
 }
 
 // 删除版本
 async function deleteVersion(id) {
-    if (!confirm('确定要删除这个版本吗？')) {
+    if (!confirm('确定要删除这个版本吗？此操作不可撤销。')) {
         return;
     }
     
@@ -1449,6 +1582,6 @@ async function deleteVersion(id) {
         }
     } catch (error) {
         console.error('删除版本失败:', error);
-        showToast('删除版本失败', 'error');
+        showToast('删除版本失败：' + error.message, 'error');
     }
 }

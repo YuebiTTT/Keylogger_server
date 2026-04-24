@@ -261,17 +261,32 @@ const asyncHandler = fn => (req, res, next) => {
 
 // ========== 认证中间件 ==========
 function authMiddleware(req, res, next) {
-    const allowedPaths = ['/login', '/login.html', '/api/login', '/api/update/check', '/api/versions', '/api/versions/'];
-    // 允许静态资源（CSS/JS）通过，否则登录页样式丢失
-    if (allowedPaths.includes(req.path) || req.path.startsWith('/css') || req.path.startsWith('/js') || req.path.startsWith('/assets')) {
+    // 允许静态资源和登录页
+    if (req.path.startsWith('/css') || req.path.startsWith('/js') || req.path.startsWith('/assets')) {
         return next();
     }
-
+    
+    // 允许客户端检查更新的路径（精确或前缀匹配）
+    if (req.path === '/api/update/check' || req.path.startsWith('/api/update/check/')) {
+        return next();
+    }
+    
+    // 允许客户端获取版本列表
+    if (req.path === '/api/versions/list/available') {
+        return next();
+    }
+    
+    // 允许登录相关的路径
+    const allowedPaths = ['/login', '/login.html', '/api/login'];
+    if (allowedPaths.includes(req.path)) {
+        return next();
+    }
+    
     const cookies = parseCookies(req.headers.cookie || '');
     if (verifyAuthToken(cookies[AUTH_CONFIG.cookieName])) {
         return next();
     }
-
+    
     if (req.path.startsWith('/api/')) {
         return res.status(401).json({ error: '未授权' });
     }
@@ -680,7 +695,8 @@ async function initDatabase() {
 
         logger.info('MySQL 数据库表初始化完成');
     } catch (error) {
-        logger.warn('数据库初始化失败，将在无数据库模式下运行', { error: error.message });
+        logger.error('数据库初始化失败，程序终止', { error: error.message });
+        throw new Error(`数据库初始化失败: ${error.message}`);
     }
 }
 
@@ -2022,18 +2038,53 @@ app.post('/api/versions', asyncHandler(async (req, res) => {
         return res.status(400).json({ error: '版本号和下载链接不能为空' });
     }
     
-    // 如果设置为激活状态，先取消其他版本的激活状态
-    if (is_active) {
-        await executeWithRetry('UPDATE client_versions SET is_active = FALSE WHERE is_active = TRUE');
+    // 验证版本号格式 (这里采用三段式: x.y.z)
+    if (!/^\d+\.\d+\.\d+$/.test(version)) {
+        return res.status(400).json({ error: '版本号格式错误，应为 X.Y.Z 格式' });
     }
     
-    await executeWithRetry(
-        'INSERT INTO client_versions (version, download_url, is_active, force_update) VALUES (?, ?, ?, ?)',
-        [version, download_url, is_active || false, force_update || false]
-    );
+    // 验证URL格式
+    try {
+        new URL(download_url);
+    } catch (e) {
+        return res.status(400).json({ error: '下载链接格式错误，请输入有效的URL' });
+    }
     
-    logger.info(`添加新版本: ${version}`, { user: req.user || 'unknown' });
-    res.json({ success: true, message: '版本添加成功' });
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+        
+        // 检查版本是否已存在
+        const [existing] = await connection.execute(
+            'SELECT id FROM client_versions WHERE version = ?',
+            [version]
+        );
+        if (existing.length > 0) {
+            await connection.rollback();
+            return res.status(400).json({ error: '版本已存在，请勿重复添加' });
+        }
+        
+        // 如果设置为激活状态，先取消其他版本的激活状态
+        if (is_active) {
+            await connection.execute('UPDATE client_versions SET is_active = FALSE WHERE is_active = TRUE');
+        }
+        
+        const [result] = await connection.execute(
+            'INSERT INTO client_versions (version, download_url, is_active, force_update) VALUES (?, ?, ?, ?)',
+            [version, download_url, is_active || false, force_update || false]
+        );
+        
+        await connection.commit();
+        
+        logger.info(`添加新版本: ${version}`, { user: req.user || 'unknown' });
+        res.json({ success: true, message: '版本添加成功', id: result.insertId });
+    } catch (error) {
+        await connection.rollback();
+        logger.error('添加版本失败', { error: error.message });
+        throw error;
+    } finally {
+        connection.release();
+    }
 }));
 
 // 更新版本设置
@@ -2045,18 +2096,67 @@ app.put('/api/versions/:id', asyncHandler(async (req, res) => {
         return res.status(400).json({ error: '版本号和下载链接不能为空' });
     }
     
-    // 如果设置为激活状态，先取消其他版本的激活状态
-    if (is_active) {
-        await executeWithRetry('UPDATE client_versions SET is_active = FALSE WHERE is_active = TRUE AND id != ?', [id]);
+    // 验证版本号格式（与添加保持一致的三段式）
+    if (!/^\d+\.\d+\.\d+$/.test(version)) {
+        return res.status(400).json({ error: '版本号格式错误，应为 X.Y.Z 格式' });
     }
     
-    await executeWithRetry(
-        'UPDATE client_versions SET version = ?, download_url = ?, is_active = ?, force_update = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-        [version, download_url, is_active || false, force_update || false, id]
-    );
+    // 验证 URL 格式
+    try {
+        new URL(download_url);
+    } catch (e) {
+        return res.status(400).json({ error: '下载链接格式错误' });
+    }
     
-    logger.info(`更新版本: ${version}`, { user: req.user || 'unknown' });
-    res.json({ success: true, message: '版本更新成功' });
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+        
+        // 检查版本是否存在
+        const [versionCheck] = await connection.execute(
+            'SELECT id FROM client_versions WHERE id = ?',
+            [id]
+        );
+        if (versionCheck.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: '版本不存在' });
+        }
+        
+        // 检查修改后的版本号是否与其他记录冲突
+        const [existing] = await connection.execute(
+            'SELECT id FROM client_versions WHERE version = ? AND id != ?',
+            [version, id]
+        );
+        if (existing.length > 0) {
+            await connection.rollback();
+            return res.status(400).json({ error: '版本已存在，请使用其他版本号' });
+        }
+        
+        // 如果设置为激活状态，先取消其他版本的激活
+        if (is_active) {
+            await connection.execute(
+                'UPDATE client_versions SET is_active = FALSE WHERE is_active = TRUE AND id != ?',
+                [id]
+            );
+        }
+        
+        // 更新版本记录
+        await connection.execute(
+            'UPDATE client_versions SET version = ?, download_url = ?, is_active = ?, force_update = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+            [version, download_url, is_active || false, force_update || false, id]
+        );
+        
+        await connection.commit();
+        
+        logger.info(`更新版本: ${version}`, { user: req.user || 'unknown' });
+        res.json({ success: true, message: '版本更新成功' });
+    } catch (error) {
+        await connection.rollback();
+        logger.error('更新版本失败', { error: error.message });
+        throw error;
+    } finally {
+        connection.release();
+    }
 }));
 
 // 删除版本
