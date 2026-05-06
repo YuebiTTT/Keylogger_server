@@ -1020,6 +1020,130 @@
             animation: spin 1s linear infinite;
             margin-right: 0.5rem;
         }
+
+        /* 徽章样式 */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.25rem 0.6rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            gap: 0.25rem;
+        }
+
+        .badge-success {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--success);
+        }
+
+        .badge-secondary {
+            background: rgba(107, 114, 128, 0.15);
+            color: var(--gray);
+        }
+
+        .badge-warning {
+            background: rgba(245, 158, 11, 0.15);
+            color: var(--warning);
+        }
+
+        .badge-info {
+            background: rgba(59, 130, 246, 0.15);
+            color: var(--primary);
+        }
+
+        .badge-danger {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--danger);
+        }
+
+        /* 版本管理表格样式 */
+        .version-url-cell {
+            max-width: 300px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .version-url-cell a {
+            color: var(--primary);
+            text-decoration: none;
+        }
+
+        .version-url-cell a:hover {
+            text-decoration: underline;
+        }
+
+        /* 复选框列表样式 */
+        .checkbox-list-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.4rem 0.5rem;
+            border-bottom: 1px solid var(--gray-light);
+            font-size: 0.875rem;
+        }
+
+        .checkbox-list-item:last-child {
+            border-bottom: none;
+        }
+
+        .checkbox-list-item input[type="checkbox"] {
+            width: auto;
+            margin: 0;
+        }
+
+        .checkbox-list-item .status-dot {
+            flex-shrink: 0;
+        }
+
+        /* 更新推送结果样式 */
+        .update-result {
+            padding: 0.5rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            margin-top: 0.5rem;
+        }
+
+        .update-result.success {
+            background: rgba(16, 185, 129, 0.1);
+            color: var(--success);
+        }
+
+        .update-result.error {
+            background: rgba(239, 68, 68, 0.1);
+            color: var(--danger);
+        }
+
+        /* input[type=url] 样式 */
+        input[type="url"] {
+            padding: 0.625rem;
+            border: 2px solid var(--gray-light);
+            border-radius: 6px;
+            font-size: 0.875rem;
+            transition: all 0.2s ease;
+            width: 100%;
+        }
+
+        input[type="url"]:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+            transform: translateY(-1px);
+        }
+
+        input[type="url"]::placeholder {
+            color: var(--gray);
+            opacity: 0.7;
+        }
+
+        /* checkbox 样式 */
+        input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+            accent-color: var(--primary);
+        }
     </style>
 </head>
 <body>
@@ -1048,6 +1172,9 @@
             </div>
             <div class="nav-item" data-page="blacklist">
                 <i class="fas fa-ban"></i> 黑名单管理
+            </div>
+            <div class="nav-item" data-page="versions">
+                <i class="fas fa-code-branch"></i> 版本管理
             </div>
             <div class="nav-item" data-page="settings">
                 <i class="fas fa-cog"></i> 系统信息
@@ -1083,6 +1210,9 @@
                     </button>
                     <button class="btn btn-danger" onclick="broadcastCommand('stop_upload')">
                         <i class="fas fa-stop"></i> 全部停止上传
+                    </button>
+                    <button class="btn btn-warning" onclick="showBatchUpdateModal()">
+                        <i class="fas fa-cloud-download-alt"></i> 批量推送更新
                     </button>
                 </div>
 
@@ -1184,6 +1314,30 @@
                 </div>
             </div>
 
+            <!-- 版本管理页面 -->
+            <div id="versionsPage" class="page" style="display: none;">
+                <div class="toolbar">
+                    <button class="btn btn-success" onclick="showAddVersionModal()">
+                        <i class="fas fa-plus-circle"></i> 添加新版本
+                    </button>
+                    <button class="btn btn-primary" onclick="loadVersions()">
+                        <i class="fas fa-sync-alt"></i> 刷新版本列表
+                    </button>
+                    <div style="flex: 1;"></div>
+                    <button class="btn btn-warning" onclick="showBatchUpdateModal()">
+                        <i class="fas fa-cloud-download-alt"></i> 批量推送更新
+                    </button>
+                </div>
+
+                <div class="card">
+                    <h3><i class="fas fa-code-branch"></i> 版本列表</h3>
+                    <p style="color: var(--gray); margin-bottom: 1rem; font-size: 0.9rem;">
+                        管理客户端版本。激活的版本将在客户端请求更新时自动下发。
+                    </p>
+                    <div id="versionsTableContainer"></div>
+                </div>
+            </div>
+
             <!-- 系统信息页面 -->
             <div id="settingsPage" class="page" style="display: none;">
                 <div class="card">
@@ -1199,21 +1353,6 @@
                     <button class="btn btn-primary" onclick="saveSettings()">
                         <i class="fas fa-save"></i> 保存设置
                     </button>
-                </div>
-                <div class="card">
-                    <h3><i class="fas fa-mobile-alt"></i> 客户端版本管理</h3>
-                    <p style="color: var(--gray); margin-bottom: 1rem; font-size: 0.9rem;">
-                        在这里添加和管理客户端版本。激活的版本将在客户端请求更新时自动下发。
-                    </p>
-                    <div class="form-group" style="display: flex; gap: 1rem; margin-bottom: 1.5rem;">
-                        <button class="btn btn-primary" onclick="loadVersions()" style="flex: 1;">
-                            <i class="fas fa-sync-alt"></i> 刷新版本列表
-                        </button>
-                        <button class="btn btn-success" onclick="showAddVersionModal()" style="flex: 1;">
-                            <i class="fas fa-plus-circle"></i> 添加新版本
-                        </button>
-                    </div>
-                    <div id="versionsTable"></div>
                 </div>
                 <div class="card">
                     <h3>关于</h3>
@@ -1284,6 +1423,7 @@
             <div class="tabs">
                 <div class="tab active" data-tab="overview">概览</div>
                 <div class="tab" data-tab="control">控制</div>
+                <div class="tab" data-tab="update">更新</div>
                 <div class="tab" data-tab="logs">日志</div>
             </div>
             <div class="tab-content active" id="overviewTab">
@@ -1322,6 +1462,39 @@
                         <input type="text" id="serverHost" placeholder="服务器 IP">
                         <input type="number" id="serverPort" placeholder="端口" value="5244" style="width: 100px;">
                         <button class="btn btn-primary" onclick="setServer()">设置</button>
+                    </div>
+                </div>
+            </div>
+            <div class="tab-content" id="updateTab">
+                <div class="form-group">
+                    <label><i class="fas fa-cloud-download-alt"></i> 推送更新到此客户端</label>
+                    <p style="color: var(--gray); font-size: 0.85rem; margin-bottom: 0.75rem;">
+                        选择一个版本推送给此客户端，客户端将自动下载并安装更新。
+                    </p>
+                    <div style="display: flex; gap: 0.5rem; align-items: flex-end; flex-wrap: wrap;">
+                        <div style="flex: 1; min-width: 200px;">
+                            <label style="font-size: 0.8rem; color: var(--gray); margin-bottom: 0.25rem;">选择版本</label>
+                            <select id="clientUpdateVersion" style="width: 100%;">
+                                <option value="">加载中...</option>
+                            </select>
+                        </div>
+                        <button class="btn btn-warning" onclick="pushUpdateToClient()">
+                            <i class="fas fa-paper-plane"></i> 推送更新
+                        </button>
+                    </div>
+                    <div id="clientUpdateStatus" style="margin-top: 0.5rem;"></div>
+                </div>
+                <div class="form-group">
+                    <label><i class="fas fa-link"></i> 自定义更新</label>
+                    <p style="color: var(--gray); font-size: 0.85rem; margin-bottom: 0.75rem;">
+                        手动指定版本号和下载链接推送更新。
+                    </p>
+                    <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                        <input type="text" id="customUpdateVersion" placeholder="版本号 (如 1.0.1)" style="flex: 1; min-width: 120px;">
+                        <input type="text" id="customUpdateUrl" placeholder="下载链接 URL" style="flex: 2; min-width: 200px;">
+                        <button class="btn btn-primary" onclick="pushCustomUpdateToClient()">
+                            <i class="fas fa-paper-plane"></i> 推送
+                        </button>
                     </div>
                 </div>
             </div>
@@ -1410,6 +1583,48 @@
                     <i class="fas fa-save"></i> 更新版本
                 </button>
                 <button class="btn btn-secondary" onclick="hideModal('editVersionModal')" style="flex: 1;">
+                    <i class="fas fa-times"></i> 取消
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 批量推送更新模态框 -->
+    <div class="modal" id="batchUpdateModal">
+        <div class="modal-content" style="max-width: 600px;">
+            <div class="modal-header">
+                <h3><i class="fas fa-cloud-download-alt"></i> 批量推送更新</h3>
+                <button class="close-btn" onclick="hideModal('batchUpdateModal')">&times;</button>
+            </div>
+            <div class="form-group">
+                <label>目标客户端</label>
+                <div id="batchUpdateClientList" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--gray-light); border-radius: 6px; padding: 0.5rem;">
+                </div>
+                <div style="margin-top: 0.5rem; display: flex; gap: 0.5rem;">
+                    <button class="btn btn-sm btn-secondary" onclick="selectAllBatchClients(true)">全选在线</button>
+                    <button class="btn btn-sm btn-secondary" onclick="selectAllBatchClients(false)">取消全选</button>
+                    <span id="batchUpdateSelectedCount" style="color: var(--gray); font-size: 0.85rem; margin-left: auto; align-self: center;">已选 0 个</span>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>选择版本</label>
+                <select id="batchUpdateVersion" style="width: 100%;">
+                    <option value="">加载中...</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label style="font-size: 0.85rem; color: var(--gray);">或手动指定</label>
+                <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                    <input type="text" id="batchCustomVersion" placeholder="版本号 (如 1.0.1)" style="flex: 1; min-width: 120px;">
+                    <input type="text" id="batchCustomUrl" placeholder="下载链接 URL" style="flex: 2; min-width: 200px;">
+                </div>
+            </div>
+            <div id="batchUpdateStatus" style="margin-bottom: 0.75rem;"></div>
+            <div class="form-group" style="display: flex; gap: 1rem;">
+                <button class="btn btn-warning" onclick="executeBatchUpdate()" style="flex: 1;">
+                    <i class="fas fa-paper-plane"></i> 推送更新
+                </button>
+                <button class="btn btn-secondary" onclick="hideModal('batchUpdateModal')" style="flex: 1;">
                     <i class="fas fa-times"></i> 取消
                 </button>
             </div>

