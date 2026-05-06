@@ -76,10 +76,8 @@ document.querySelectorAll('.nav-item').forEach(item => {
             blacklistPage = 1;
             loadBlacklist();
             stopAutoRefresh();
-        } else if (page === 'versions') {
-            loadVersions();
-            stopAutoRefresh();
         } else if (page === 'settings') {
+            loadVersions();
             stopAutoRefresh();
         } else {
             stopAutoRefresh();
@@ -360,9 +358,6 @@ function showClientModal(clientId) {
         <p><strong>最后连接:</strong> ${escapeHtml(client.lastSeen ? new Date(client.lastSeen).toLocaleString() : '从未')}</p>
     `;
     document.getElementById('clientInfo').innerHTML = infoHtml;
-
-    // 加载更新版本选择器
-    loadClientUpdateVersions(client);
 
     // 加载客户端日志列表
     loadClientLogs(clientId);
@@ -1270,8 +1265,8 @@ let versionRefreshInterval = null;
 
 // 加载版本列表
 async function loadVersions() {
-    const container = document.getElementById('versionsTableContainer');
-    if (!container) return; // 不在版本页时直接返回
+    const container = document.getElementById('versionsTable');
+    if (!container) return; // 不在设置页时直接返回
     
     if (versionLoadingState) return;
     
@@ -1308,15 +1303,15 @@ async function loadVersions() {
 
 // 渲染版本表格
 function renderVersionsTable(versions) {
-    const container = document.getElementById('versionsTableContainer');
+    const container = document.getElementById('versionsTable');
     
     if (!versions || versions.length === 0) {
-        container.innerHTML = '<div style="padding: 2rem; text-align: center; color: var(--gray);"><i class="fas fa-code-branch" style="font-size: 2rem; margin-bottom: 0.5rem; display: block;"></i>暂无版本信息 - 点击"添加新版本"创建</div>';
+        container.innerHTML = '<div style="padding: 2rem; text-align: center; color: var(--gray);">暂无版本信息 - 点击"添加版本"创建新版本</div>';
         return;
     }
     
     let html = `
-        <table>
+        <table class="table">
             <thead>
                 <tr>
                     <th>版本号</th>
@@ -1324,45 +1319,36 @@ function renderVersionsTable(versions) {
                     <th>激活状态</th>
                     <th>强制更新</th>
                     <th>创建时间</th>
-                    <th style="width: 180px;">操作</th>
+                    <th style="width: 200px;">操作</th>
                 </tr>
             </thead>
             <tbody>
     `;
     
     versions.forEach(version => {
-        const activeBadge = version.is_active 
-            ? '<span class="badge badge-success"><i class="fas fa-check"></i> 激活</span>' 
-            : '<span class="badge badge-secondary">未激活</span>';
-        const forceUpdateBadge = version.force_update 
-            ? '<span class="badge badge-warning"><i class="fas fa-exclamation-triangle"></i> 强制</span>' 
-            : '<span class="badge badge-info">可选</span>';
+        const activeBadge = version.is_active ? '<span class="badge badge-success">✓ 激活</span>' : '<span class="badge badge-secondary">未激活</span>';
+        const forceUpdateBadge = version.force_update ? '<span class="badge badge-warning">强制</span>' : '<span class="badge badge-info">可选</span>';
         const createdTime = new Date(version.created_at).toLocaleString('zh-CN');
-        const shortUrl = version.download_url.length > 50 
-            ? version.download_url.substring(0, 50) + '...' 
-            : version.download_url;
         
         html += `
             <tr>
                 <td><strong>${escapeHtml(version.version)}</strong></td>
-                <td class="version-url-cell"><a href="${escapeHtml(version.download_url)}" target="_blank" title="${escapeHtml(version.download_url)}">${escapeHtml(shortUrl)}</a></td>
+                <td><small><a href="${escapeHtml(version.download_url)}" target="_blank" class="link" title="${escapeHtml(version.download_url)}">${escapeHtml(version.download_url.substring(0, 40))}...</a></small></td>
                 <td>${activeBadge}</td>
                 <td>${forceUpdateBadge}</td>
                 <td><small>${createdTime}</small></td>
                 <td>
-                    <div class="action-btns">
-                        <button class="btn btn-sm btn-primary edit-version-btn"
-                            data-id="${version.id}"
-                            data-version="${escapeHtml(version.version)}"
-                            data-url="${escapeHtml(version.download_url)}"
-                            data-active="${version.is_active}"
-                            data-force="${version.force_update}">
-                            <i class="fas fa-edit"></i>
-                        </button>
-                        <button class="btn btn-sm btn-danger" onclick="deleteVersion(${version.id})">
-                            <i class="fas fa-trash"></i>
-                        </button>
-                    </div>
+                    <button class="btn btn-sm btn-primary edit-version-btn"
+                        data-id="${version.id}"
+                        data-version="${escapeHtml(version.version)}"
+                        data-url="${escapeHtml(version.download_url)}"
+                        data-active="${version.is_active}"
+                        data-force="${version.force_update}">
+                        <i class="fas fa-edit"></i>
+                    </button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteVersion(${version.id})">
+                        <i class="fas fa-trash"></i>
+                    </button>
                 </td>
             </tr>
         `;
@@ -1375,7 +1361,7 @@ function renderVersionsTable(versions) {
     
     container.innerHTML = html;
     
-    // 绑定编辑按钮事件
+    // 绑定编辑按钮事件（事件委托）
     container.querySelectorAll('.edit-version-btn').forEach(btn => {
         btn.addEventListener('click', function() {
             const id = this.dataset.id;
@@ -1597,320 +1583,5 @@ async function deleteVersion(id) {
     } catch (error) {
         console.error('删除版本失败:', error);
         showToast('删除版本失败：' + error.message, 'error');
-    }
-}
-
-// ========== 更新控制功能 ==========
-
-// 加载客户端更新版本选择器
-async function loadClientUpdateVersions(client) {
-    const select = document.getElementById('clientUpdateVersion');
-    const statusDiv = document.getElementById('clientUpdateStatus');
-    
-    if (client.status !== 'online') {
-        select.innerHTML = '<option value="">客户端离线，无法推送更新</option>';
-        select.disabled = true;
-        statusDiv.innerHTML = '<div class="update-result error">此客户端当前离线，无法推送更新</div>';
-        return;
-    }
-    
-    select.disabled = false;
-    statusDiv.innerHTML = '';
-    select.innerHTML = '<option value="">加载版本列表中...</option>';
-    
-    try {
-        const response = await fetch('/api/versions');
-        const data = await response.json();
-        
-        if (data.success && data.versions.length > 0) {
-            select.innerHTML = '<option value="">-- 请选择版本 --</option>';
-            data.versions.forEach(v => {
-                const activeLabel = v.is_active ? ' [激活]' : '';
-                const forceLabel = v.force_update ? ' [强制]' : '';
-                select.innerHTML += `<option value="${escapeHtml(v.id)}" data-version="${escapeHtml(v.version)}" data-url="${escapeHtml(v.download_url)}">${escapeHtml(v.version)}${activeLabel}${forceLabel}</option>`;
-            });
-        } else {
-            select.innerHTML = '<option value="">暂无可用版本</option>';
-        }
-    } catch (e) {
-        console.error('加载版本列表失败:', e);
-        select.innerHTML = '<option value="">加载失败</option>';
-    }
-}
-
-// 向当前客户端推送选定的版本更新
-async function pushUpdateToClient() {
-    if (!currentClientId) {
-        showToast('请先选择客户端', 'error');
-        return;
-    }
-    
-    const select = document.getElementById('clientUpdateVersion');
-    const statusDiv = document.getElementById('clientUpdateStatus');
-    const option = select.options[select.selectedIndex];
-    
-    if (!option || !option.value) {
-        showToast('请选择要推送的版本', 'error');
-        return;
-    }
-    
-    const version = option.dataset.version;
-    const download_url = option.dataset.url;
-    
-    if (!version || !download_url) {
-        showToast('版本信息不完整', 'error');
-        return;
-    }
-    
-    statusDiv.innerHTML = '<div class="update-result" style="color: var(--gray);"><i class="fas fa-spinner fa-spin"></i> 正在推送更新...</div>';
-    
-    try {
-        const response = await fetch(`/api/clients/${encodeURIComponent(currentClientId)}/update`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ version, download_url })
-        });
-        
-        const data = await response.json();
-        
-        if (data.success) {
-            statusDiv.innerHTML = `<div class="update-result success"><i class="fas fa-check-circle"></i> 更新指令已推送: ${escapeHtml(version)}</div>`;
-            showToast(`更新 ${version} 已推送到客户端`, 'success');
-        } else {
-            statusDiv.innerHTML = `<div class="update-result error"><i class="fas fa-exclamation-circle"></i> 推送失败: ${escapeHtml(data.error)}</div>`;
-            showToast('推送更新失败: ' + data.error, 'error');
-        }
-    } catch (e) {
-        console.error('推送更新失败:', e);
-        statusDiv.innerHTML = `<div class="update-result error"><i class="fas fa-exclamation-circle"></i> 请求失败: ${escapeHtml(e.message)}</div>`;
-        showToast('推送更新失败', 'error');
-    }
-}
-
-// 向当前客户端推送自定义版本更新
-async function pushCustomUpdateToClient() {
-    if (!currentClientId) {
-        showToast('请先选择客户端', 'error');
-        return;
-    }
-    
-    const version = document.getElementById('customUpdateVersion').value.trim();
-    const download_url = document.getElementById('customUpdateUrl').value.trim();
-    const statusDiv = document.getElementById('clientUpdateStatus');
-    
-    if (!version || !download_url) {
-        showToast('请填写版本号和下载链接', 'error');
-        return;
-    }
-    
-    if (!/^\d+\.\d+\.\d+$/.test(version)) {
-        showToast('版本号格式错误，应为 X.Y.Z 格式', 'error');
-        return;
-    }
-    
-    try {
-        new URL(download_url);
-    } catch (e) {
-        showToast('下载链接格式错误', 'error');
-        return;
-    }
-    
-    statusDiv.innerHTML = '<div class="update-result" style="color: var(--gray);"><i class="fas fa-spinner fa-spin"></i> 正在推送更新...</div>';
-    
-    try {
-        const response = await fetch(`/api/clients/${encodeURIComponent(currentClientId)}/update`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ version, download_url })
-        });
-        
-        const data = await response.json();
-        
-        if (data.success) {
-            statusDiv.innerHTML = `<div class="update-result success"><i class="fas fa-check-circle"></i> 更新指令已推送: ${escapeHtml(version)}</div>`;
-            showToast(`更新 ${version} 已推送到客户端`, 'success');
-        } else {
-            statusDiv.innerHTML = `<div class="update-result error"><i class="fas fa-exclamation-circle"></i> 推送失败: ${escapeHtml(data.error)}</div>`;
-            showToast('推送更新失败: ' + data.error, 'error');
-        }
-    } catch (e) {
-        console.error('推送更新失败:', e);
-        statusDiv.innerHTML = `<div class="update-result error"><i class="fas fa-exclamation-circle"></i> 请求失败: ${escapeHtml(e.message)}</div>`;
-        showToast('推送更新失败', 'error');
-    }
-}
-
-// ========== 批量更新功能 ==========
-
-// 显示批量更新模态框
-async function showBatchUpdateModal() {
-    const clientList = document.getElementById('batchUpdateClientList');
-    const versionSelect = document.getElementById('batchUpdateVersion');
-    const statusDiv = document.getElementById('batchUpdateStatus');
-    
-    // 清空状态
-    statusDiv.innerHTML = '';
-    document.getElementById('batchCustomVersion').value = '';
-    document.getElementById('batchCustomUrl').value = '';
-    
-    // 填充客户端列表
-    const onlineClients = clients.filter(c => c.status === 'online');
-    const offlineClients = clients.filter(c => c.status !== 'online');
-    
-    if (clients.length === 0) {
-        clientList.innerHTML = '<div style="padding: 1rem; text-align: center; color: var(--gray);">暂无客户端</div>';
-    } else {
-        let html = '';
-        if (onlineClients.length > 0) {
-            html += onlineClients.map(c => `
-                <div class="checkbox-list-item">
-                    <input type="checkbox" class="batch-client-checkbox" data-client-id="${escapeHtml(c.id)}" checked>
-                    <div class="status-dot connected" style="width: 8px; height: 8px;"></div>
-                    <span>${escapeHtml(c.ip)}:${escapeHtml(c.port)}</span>
-                    <span class="badge badge-success" style="margin-left: auto;">在线</span>
-                </div>
-            `).join('');
-        }
-        if (offlineClients.length > 0) {
-            html += offlineClients.map(c => `
-                <div class="checkbox-list-item" style="opacity: 0.5;">
-                    <input type="checkbox" class="batch-client-checkbox" data-client-id="${escapeHtml(c.id)}" disabled>
-                    <div class="status-dot" style="width: 8px; height: 8px;"></div>
-                    <span>${escapeHtml(c.ip)}:${escapeHtml(c.port)}</span>
-                    <span class="badge badge-danger" style="margin-left: auto;">离线</span>
-                </div>
-            `).join('');
-        }
-        clientList.innerHTML = html;
-        
-        // 监听复选框变化
-        clientList.querySelectorAll('.batch-client-checkbox').forEach(cb => {
-            cb.addEventListener('change', updateBatchSelectedCount);
-        });
-    }
-    
-    updateBatchSelectedCount();
-    
-    // 填充版本选择器
-    versionSelect.innerHTML = '<option value="">加载版本列表中...</option>';
-    try {
-        const response = await fetch('/api/versions');
-        const data = await response.json();
-        
-        if (data.success && data.versions.length > 0) {
-            versionSelect.innerHTML = '<option value="">-- 请选择版本 --</option>';
-            data.versions.forEach(v => {
-                const activeLabel = v.is_active ? ' [激活]' : '';
-                const forceLabel = v.force_update ? ' [强制]' : '';
-                versionSelect.innerHTML += `<option value="${escapeHtml(v.id)}" data-version="${escapeHtml(v.version)}" data-url="${escapeHtml(v.download_url)}">${escapeHtml(v.version)}${activeLabel}${forceLabel}</option>`;
-            });
-        } else {
-            versionSelect.innerHTML = '<option value="">暂无可用版本 - 请手动指定</option>';
-        }
-    } catch (e) {
-        versionSelect.innerHTML = '<option value="">加载失败 - 请手动指定</option>';
-    }
-    
-    showModal('batchUpdateModal');
-}
-
-// 全选/取消全选
-function selectAllBatchClients(select) {
-    document.querySelectorAll('.batch-client-checkbox:not(:disabled)').forEach(cb => {
-        cb.checked = select;
-    });
-    updateBatchSelectedCount();
-}
-
-// 更新已选计数
-function updateBatchSelectedCount() {
-    const checked = document.querySelectorAll('.batch-client-checkbox:checked').length;
-    document.getElementById('batchUpdateSelectedCount').textContent = `已选 ${checked} 个`;
-}
-
-// 执行批量更新
-async function executeBatchUpdate() {
-    const versionSelect = document.getElementById('batchUpdateVersion');
-    const statusDiv = document.getElementById('batchUpdateStatus');
-    
-    // 获取选中的客户端
-    const selectedIds = [];
-    document.querySelectorAll('.batch-client-checkbox:checked').forEach(cb => {
-        selectedIds.push(cb.dataset.clientId);
-    });
-    
-    if (selectedIds.length === 0) {
-        showToast('请至少选择一个在线客户端', 'error');
-        return;
-    }
-    
-    // 获取版本信息（优先从选择器，其次手动输入）
-    let version, download_url;
-    
-    const selectedOption = versionSelect.options[versionSelect.selectedIndex];
-    if (selectedOption && selectedOption.value) {
-        version = selectedOption.dataset.version;
-        download_url = selectedOption.dataset.url;
-    } else {
-        version = document.getElementById('batchCustomVersion').value.trim();
-        download_url = document.getElementById('batchCustomUrl').value.trim();
-    }
-    
-    if (!version || !download_url) {
-        showToast('请选择版本或手动填写版本号和下载链接', 'error');
-        return;
-    }
-    
-    if (!/^\d+\.\d+\.\d+$/.test(version)) {
-        showToast('版本号格式错误，应为 X.Y.Z 格式', 'error');
-        return;
-    }
-    
-    try {
-        new URL(download_url);
-    } catch (e) {
-        showToast('下载链接格式错误', 'error');
-        return;
-    }
-    
-    if (!confirm(`确定要向 ${selectedIds.length} 个客户端推送更新 ${version} 吗？`)) {
-        return;
-    }
-    
-    statusDiv.innerHTML = '<div class="update-result" style="color: var(--gray);"><i class="fas fa-spinner fa-spin"></i> 正在推送更新...</div>';
-    
-    try {
-        const response = await fetch('/api/clients/batch-update', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ clientIds: selectedIds, version, download_url })
-        });
-        
-        const data = await response.json();
-        
-        if (data.success) {
-            const successCount = data.data.results.filter(r => r.success).length;
-            const failCount = data.data.results.filter(r => !r.success).length;
-            
-            let resultHtml = `<div class="update-result success"><i class="fas fa-check-circle"></i> ${escapeHtml(data.message)}</div>`;
-            
-            if (failCount > 0) {
-                resultHtml += '<div style="margin-top: 0.5rem;">';
-                data.data.results.filter(r => !r.success).forEach(r => {
-                    resultHtml += `<div class="update-result error" style="margin-top: 0.25rem; font-size: 0.8rem;"><i class="fas fa-times-circle"></i> ${escapeHtml(r.clientId)}: ${escapeHtml(r.error || '失败')}</div>`;
-                });
-                resultHtml += '</div>';
-            }
-            
-            statusDiv.innerHTML = resultHtml;
-            showToast(`批量更新完成: 成功 ${successCount}, 失败 ${failCount}`, successCount > 0 ? 'success' : 'error');
-        } else {
-            statusDiv.innerHTML = `<div class="update-result error"><i class="fas fa-exclamation-circle"></i> ${escapeHtml(data.error)}</div>`;
-            showToast('批量更新失败: ' + data.error, 'error');
-        }
-    } catch (e) {
-        console.error('批量更新失败:', e);
-        statusDiv.innerHTML = `<div class="update-result error"><i class="fas fa-exclamation-circle"></i> 请求失败: ${escapeHtml(e.message)}</div>`;
-        showToast('批量更新失败', 'error');
     }
 }

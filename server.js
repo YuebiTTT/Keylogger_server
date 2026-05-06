@@ -925,23 +925,6 @@ class ClientManager {
         return Promise.all(tasks);
     }
 
-    async broadcastCommandToClients(clientIds, command) {
-        const tasks = [];
-        for (const clientId of clientIds) {
-            const client = this.clients.get(clientId);
-            if (client && client.status === 'online') {
-                tasks.push(
-                    this.sendCommand(clientId, command).then(result => ({ clientId, ...result }))
-                );
-            } else {
-                tasks.push(
-                    Promise.resolve({ clientId, success: false, error: '客户端离线或不存在' })
-                );
-            }
-        }
-        return Promise.all(tasks);
-    }
-
     startHeartbeat() {
         const limit = pLimit(CONFIG.heartbeatConcurrency);
         this.heartbeatTimer = setInterval(() => {
@@ -1509,99 +1492,6 @@ app.delete('/api/clients/:clientId/logs/:filename', asyncHandler(async (req, res
     res.json({ success: true, message: '文件已删除' });
 }));
 
-// 向指定客户端推送更新指令
-app.post('/api/clients/:clientId/update', asyncHandler(async (req, res) => {
-    const { clientId } = req.params;
-    const { version, download_url } = req.body;
-
-    if (!version || !download_url) {
-        return res.status(400).json({ error: '版本号和下载链接不能为空' });
-    }
-
-    // 验证版本号格式
-    if (!/^\d+\.\d+\.\d+$/.test(version)) {
-        return res.status(400).json({ error: '版本号格式错误，应为 X.Y.Z 格式' });
-    }
-
-    // 验证URL格式
-    try {
-        new URL(download_url);
-    } catch (e) {
-        return res.status(400).json({ error: '下载链接格式错误' });
-    }
-
-    // 发送更新命令到客户端
-    const command = {
-        action: 'update_to',
-        version: version,
-        download_url: download_url
-    };
-
-    const result = await clientManager.sendCommand(clientId, command);
-
-    if (result.success) {
-        logger.info(`向客户端 ${clientId} 推送更新指令: ${version}`, { user: req.user || 'unknown' });
-        res.json({
-            success: true,
-            message: `更新指令已发送到客户端 ${clientId}`,
-            data: { clientId, version, download_url }
-        });
-    } else {
-        logger.error(`向客户端 ${clientId} 推送更新指令失败: ${result.error}`, { user: req.user || 'unknown' });
-        res.status(500).json({ error: result.error || '发送更新指令失败' });
-    }
-}));
-
-// 批量向多个客户端推送更新指令
-app.post('/api/clients/batch-update', asyncHandler(async (req, res) => {
-    const { clientIds, version, download_url } = req.body;
-
-    if (!Array.isArray(clientIds) || clientIds.length === 0) {
-        return res.status(400).json({ error: 'clientIds 必须是有效的数组' });
-    }
-
-    if (!version || !download_url) {
-        return res.status(400).json({ error: '版本号和下载链接不能为空' });
-    }
-
-    // 验证版本号格式
-    if (!/^\d+\.\d+\.\d+$/.test(version)) {
-        return res.status(400).json({ error: '版本号格式错误，应为 X.Y.Z 格式' });
-    }
-
-    // 发送更新命令到所有指定客户端
-    const command = {
-        action: 'update_to',
-        version: version,
-        download_url: download_url
-    };
-
-    const results = await clientManager.broadcastCommandToClients(clientIds, command);
-
-    const successCount = results.filter(r => r.success).length;
-    const failCount = results.filter(r => !r.success).length;
-
-    logger.info(`批量向 ${clientIds.length} 个客户端推送更新 ${version}`, {
-        user: req.user || 'unknown',
-        success: successCount,
-        failed: failCount
-    });
-
-    res.json({
-        success: true,
-        message: `更新指令已发送，成功: ${successCount}，失败: ${failCount}`,
-        data: {
-            version,
-            download_url,
-            results: results.map(r => ({
-                clientId: r.clientId,
-                success: r.success,
-                error: r.error
-            }))
-        }
-    });
-}));
-
 // 批量删除日志：增加预检并发控制
 app.post('/api/batch/delete-logs', asyncHandler(async (req, res) => {
     const { files } = req.body;
@@ -2132,30 +2022,12 @@ app.get('/api/blacklist', asyncHandler(async (req, res) => {
 
 // ========== 版本管理 API ==========
 
-// 获取所有可用版本（需要认证）
+// 获取所有可用版本
 app.get('/api/versions', asyncHandler(async (req, res) => {
     const rows = await executeWithRetry(
         'SELECT id, version, download_url, is_active, force_update, created_at, updated_at FROM client_versions ORDER BY version DESC'
     );
     res.json({ success: true, versions: rows });
-}));
-
-// 获取可用版本列表（客户端无需认证，用于获取所有可用版本信息）
-app.get('/api/versions/list/available', asyncHandler(async (req, res) => {
-    const rows = await executeWithRetry(
-        'SELECT id, version, download_url, is_active, force_update, created_at FROM client_versions ORDER BY version DESC'
-    );
-    res.json({
-        success: true,
-        versions: rows.map(row => ({
-            id: row.id,
-            version: row.version,
-            download_url: row.download_url,
-            is_active: row.is_active,
-            force_update: row.force_update,
-            created_at: row.created_at
-        }))
-    });
 }));
 
 // 添加新版本
