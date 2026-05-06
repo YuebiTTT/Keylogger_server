@@ -751,6 +751,97 @@
             width: 100%;
         }
 
+        /* 文件列表容器样式 */
+        .file-list-container {
+            max-height: 200px;
+            overflow-y: auto;
+            border: 1.5px solid var(--gray-light);
+            border-radius: 6px;
+            background: var(--light);
+        }
+
+        .file-list-container .loading,
+        .file-list-container .empty {
+            padding: 1rem;
+            text-align: center;
+            color: var(--gray);
+            font-size: 0.9rem;
+        }
+
+        .file-list-container .error {
+            padding: 1rem;
+            text-align: center;
+            color: var(--danger);
+            font-size: 0.9rem;
+        }
+
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--gray-light);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .file-item:last-child {
+            border-bottom: none;
+        }
+
+        .file-item:hover {
+            background: var(--white);
+        }
+
+        .file-item.selected {
+            background: rgba(59, 130, 246, 0.1);
+            border-left: 3px solid var(--primary);
+        }
+
+        .file-item .file-name {
+            flex: 1;
+            font-weight: 500;
+            color: var(--dark);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .file-item .file-size {
+            margin-left: 1rem;
+            font-size: 0.85rem;
+            color: var(--gray);
+            flex-shrink: 0;
+        }
+
+        /* URL 输入框优化 */
+        .url-input-wrapper {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+
+        .url-input-wrapper input {
+            padding-right: 2.5rem;
+        }
+
+        .clear-url-btn {
+            position: absolute;
+            right: 0.5rem;
+            background: none;
+            border: none;
+            color: var(--gray);
+            cursor: pointer;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            transition: all 0.2s ease;
+        }
+
+        .clear-url-btn:hover {
+            color: var(--danger);
+            background: rgba(239, 68, 68, 0.1);
+        }
+
         .log-viewer {
             background: var(--white);
             color: var(--dark);
@@ -933,6 +1024,85 @@
             display: block;
         }
 
+        .console-toolbar {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .console-view-toggle {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .terminal-button {
+            padding: 0.55rem 1rem;
+            border: 1px solid var(--gray-light);
+            background: var(--light);
+            color: var(--text);
+            cursor: pointer;
+            border-radius: 6px;
+            transition: all 0.2s ease;
+            font-size: 0.95rem;
+        }
+
+        .terminal-button.active,
+        .terminal-button:hover {
+            background: var(--primary);
+            color: #fff;
+            border-color: var(--primary);
+        }
+
+        .console-toolbar input {
+            flex: 1;
+            min-width: 220px;
+            padding: 0.7rem 0.9rem;
+            border: 1px solid var(--gray-light);
+            border-radius: 8px;
+            background: #0d1117;
+            color: #d0f0b7;
+        }
+
+        .console-panel {
+            background: #0b1118;
+            border: 1px solid #21303f;
+            border-radius: 8px;
+            padding: 1rem;
+            min-height: 320px;
+            max-height: 420px;
+            overflow: auto;
+            font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+            color: #b7f2a1;
+        }
+
+        .console-output {
+            white-space: pre-wrap;
+            word-break: break-word;
+            margin: 0;
+            font-size: 0.92rem;
+            line-height: 1.5;
+        }
+
+        .console-input-area {
+            margin-top: 0.75rem;
+        }
+
+        .console-input-area input {
+            width: 100%;
+            padding: 0.85rem 1rem;
+            border-radius: 8px;
+            border: 1px solid var(--gray-light);
+            background: #0d1118;
+            color: #d0f0b7;
+            font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+        }
+
+        .console-input-area input::placeholder {
+            color: #7fae7f;
+        }
+
         .empty-state {
             text-align: center;
             padding: 4rem 2rem;
@@ -1071,6 +1241,8 @@
                         <div class="spinner"></div>
                         <span>扫描中...</span>
                     </div>
+                    <input type="text" id="clientTagFilter" placeholder="按标签筛选" style="width: 180px; margin-left: 1rem;">
+                    <button class="btn btn-secondary" onclick="clearClientTagFilter()">清除</button>
                     <div style="flex: 1;"></div>
                     <button class="btn btn-warning" onclick="broadcastCommand('pause_record')">
                         <i class="fas fa-pause"></i> 全部暂停
@@ -1096,13 +1268,15 @@
                                 <th>状态</th>
                                 <th>录制</th>
                                 <th>上传</th>
+                                <th>版本</th>
+                                <th>标签</th>
                                 <th>最后连接</th>
                                 <th>操作</th>
                             </tr>
                         </thead>
                         <tbody id="clientsTable">
                             <tr>
-                                <td colspan="7" class="empty-state">暂无客户端连接</td>
+                                <td colspan="9" class="empty-state">暂无客户端连接</td>
                             </tr>
                         </tbody>
                     </table>
@@ -1187,6 +1361,61 @@
             <!-- 系统信息页面 -->
             <div id="settingsPage" class="page" style="display: none;">
                 <div class="card">
+                    <h3><i class="fas fa-mobile-alt"></i> 客户端版本管理</h3>
+                    <p style="color: var(--gray); margin-bottom: 1rem; font-size: 0.9rem;">
+                        从Alist获取客户端版本并管理激活状态。激活的版本将在客户端请求更新时自动下发。
+                    </p>
+                    <div class="form-group" style="margin-bottom: 1.5rem;">
+                        <button class="btn btn-primary" onclick="loadVersions()" style="width: 100%;">
+                            <i class="fas fa-sync-alt"></i> 从Alist刷新版本列表
+                        </button>
+                    </div>
+                    <div style="display: flex; gap: 1rem; margin-bottom: 1rem;">
+                    </div>
+                    <div id="versionsTable"></div>
+                </div>
+                <div class="card">
+                    <h3>日志维护</h3>
+                    <p style="color: var(--gray); margin-bottom: 1rem; font-size: 0.9rem;">
+                        扫描并选择性清理 Alist 中的日志文件。
+                    </p>
+                    <div style="display: flex; gap: 1rem;">
+                        <button class="btn btn-primary" onclick="scanExpiredLogs()">
+                            <i class="fas fa-search"></i> 扫描过期日志
+                        </button>
+                        <button class="btn btn-warning" id="cleanAllExpiredBtn" style="display: none;" onclick="cleanAllExpired()">
+                            <i class="fas fa-broom"></i> 一键清理全部
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 过期日志预览模态框 -->
+                <div class="modal" id="expiredLogsModal">
+                    <div class="modal-content" style="max-width: 700px;">
+                        <div class="modal-header">
+                            <h3>即将清理的过期日志</h3>
+                            <button class="close-btn" onclick="hideModal('expiredLogsModal')">&times;</button>
+                        </div>
+                        <div style="margin-bottom: 1rem; display: flex; justify-content: space-between; align-items: center;">
+                            <span style="color: var(--gray);">共 <span id="expiredCount">0</span> 个文件</span>
+                            <div>
+                                <label style="cursor: pointer;">
+                                    <input type="checkbox" id="selectAllExpired" checked onchange="toggleSelectAllExpired()"> 全选
+                                </label>
+                            </div>
+                        </div>
+                        <div class="file-list-container" id="expiredFileList" style="max-height: 300px; overflow-y: auto; border: 1px solid var(--gray-light); border-radius: 6px;">
+                            <!-- 动态生成文件列表 -->
+                        </div>
+                        <div style="margin-top: 1rem; display: flex; justify-content: flex-end; gap: 0.75rem;">
+                            <button class="btn btn-secondary" onclick="hideModal('expiredLogsModal')">取消</button>
+                            <button class="btn btn-danger" onclick="deleteSelectedExpired()">
+                                <i class="fas fa-trash"></i> 删除选中
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
                     <h3>系统信息</h3>
                     <div class="form-group">
                         <label>心跳检测间隔 (毫秒)</label>
@@ -1199,21 +1428,6 @@
                     <button class="btn btn-primary" onclick="saveSettings()">
                         <i class="fas fa-save"></i> 保存设置
                     </button>
-                </div>
-                <div class="card">
-                    <h3><i class="fas fa-mobile-alt"></i> 客户端版本管理</h3>
-                    <p style="color: var(--gray); margin-bottom: 1rem; font-size: 0.9rem;">
-                        在这里添加和管理客户端版本。激活的版本将在客户端请求更新时自动下发。
-                    </p>
-                    <div class="form-group" style="display: flex; gap: 1rem; margin-bottom: 1.5rem;">
-                        <button class="btn btn-primary" onclick="loadVersions()" style="flex: 1;">
-                            <i class="fas fa-sync-alt"></i> 刷新版本列表
-                        </button>
-                        <button class="btn btn-success" onclick="showAddVersionModal()" style="flex: 1;">
-                            <i class="fas fa-plus-circle"></i> 添加新版本
-                        </button>
-                    </div>
-                    <div id="versionsTable"></div>
                 </div>
                 <div class="card">
                     <h3>关于</h3>
@@ -1279,12 +1493,13 @@
         <div class="modal-content" style="max-width: 700px;">
             <div class="modal-header">
                 <h3 id="clientModalTitle">客户端详情</h3>
-                <button class="close-btn" onclick="hideModal('clientModal')">&times;</button>
+                <button class="close-btn" onclick="hideClientModal()">&times;</button>
             </div>
             <div class="tabs">
                 <div class="tab active" data-tab="overview">概览</div>
                 <div class="tab" data-tab="control">控制</div>
                 <div class="tab" data-tab="logs">日志</div>
+                <div class="tab" data-tab="console">控制台</div>
             </div>
             <div class="tab-content active" id="overviewTab">
                 <div id="clientInfo"></div>
@@ -1314,6 +1529,20 @@
                     <label>状态管理</label>
                     <div class="action-btns">
                         <button class="btn btn-primary" onclick="sendCommand('ping')">心跳检测</button>
+                        <button class="btn btn-info" onclick="getLogsInfo()">获取日志信息</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>客户端更新</label>
+                    <div class="action-btns">
+                        <button class="btn btn-primary" onclick="getClientStatus()">获取版本</button>
+                        <button class="btn btn-warning" onclick="triggerClientUpdate()">触发更新</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>日志管理</label>
+                    <div class="action-btns">
+                        <button class="btn btn-danger" onclick="deleteClientLog(prompt('请输入要删除的日志文件名:'))">删除指定日志</button>
                     </div>
                 </div>
                 <div class="form-group">
@@ -1325,93 +1554,39 @@
                     </div>
                 </div>
             </div>
+            <div class="tab-content" id="consoleTab">
+                <div class="console-toolbar">
+                    <div class="console-view-toggle">
+                        <button class="terminal-button active" id="consoleViewRawBtn" onclick="setConsoleViewMode('raw')">原始响应</button>
+                        <button class="terminal-button" id="consoleViewProcessedBtn" onclick="setConsoleViewMode('processed')">后端输出</button>
+                    </div>
+                    <input type="text" id="consoleFilterInput" placeholder="过滤关键字" />
+                    <button class="btn btn-secondary" id="consolePauseBtn" onclick="toggleConsolePause()">暂停滚动</button>
+                </div>
+                <div class="console-panel">
+                    <pre id="consoleOutput" class="console-output"></pre>
+                </div>
+                <div class="console-input-area">
+                    <input type="text" id="consoleInput" placeholder="输入命令并回车发送" autocomplete="off" />
+                </div>
+            </div>
             <div class="tab-content" id="logsTab">
                 <div id="clientLogs"></div>
             </div>
         </div>
     </div>
 
-    <!-- 添加版本模态框 -->
-    <div class="modal" id="addVersionModal">
-        <div class="modal-content">
+    <!-- 通用确认模态框 -->
+    <div class="modal" id="confirmModal">
+        <div class="modal-content" style="max-width: 400px;">
             <div class="modal-header">
-                <h3>添加新版本</h3>
-                <button class="close-btn" onclick="hideModal('addVersionModal')">&times;</button>
+                <h3 id="confirmTitle">确认操作</h3>
+                <button class="close-btn" onclick="hideModal('confirmModal')">&times;</button>
             </div>
-            <div class="form-group">
-                <label><i class="fas fa-tag"></i> 版本号 <span style="color: var(--danger);">*</span></label>
-                <input type="text" id="versionNumber" placeholder="格式: 1.0.0 或 1.2.3.4" pattern="^\d+(\.\d+){0,3}$" title="请输入有效的版本号，如 1.0.0" required>
-                <small style="color: var(--gray);">版本号格式: X.Y.Z 或 X.Y.Z.W</small>
-            </div>
-            <div class="form-group">
-                <label><i class="fas fa-link"></i> 下载链接 <span style="color: var(--danger);">*</span></label>
-                <input type="url" id="versionUrl" placeholder="http://example.com/app.exe" title="请输入有效的下载链接" required>
-                <small style="color: var(--gray);">客户端将从此链接下载更新文件</small>
-            </div>
-            <div class="form-group">
-                <label style="display: flex; align-items: center; gap: 0.5rem;">
-                    <input type="checkbox" id="isActiveVersion" style="width: auto;"> 
-                    <span><i class="fas fa-star"></i> 设置为当前激活版本</span>
-                </label>
-                <small style="color: var(--gray);">激活版本将在客户端检查更新时下发</small>
-            </div>
-            <div class="form-group">
-                <label style="display: flex; align-items: center; gap: 0.5rem;">
-                    <input type="checkbox" id="forceUpdate" style="width: auto;"> 
-                    <span><i class="fas fa-exclamation-circle"></i> 强制更新</span>
-                </label>
-                <small style="color: var(--gray);">启用后，客户端必须更新才能继续使用</small>
-            </div>
-            <div class="form-group" style="display: flex; gap: 1rem;">
-                <button class="btn btn-primary" onclick="addVersion()" style="flex: 1;">
-                    <i class="fas fa-plus"></i> 添加版本
-                </button>
-                <button class="btn btn-secondary" onclick="hideModal('addVersionModal')" style="flex: 1;">
-                    <i class="fas fa-times"></i> 取消
-                </button>
-            </div>
-        </div>
-    </div>
-
-    <!-- 编辑版本模态框 -->
-    <div class="modal" id="editVersionModal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>编辑版本</h3>
-                <button class="close-btn" onclick="hideModal('editVersionModal')">&times;</button>
-            </div>
-            <input type="hidden" id="editVersionId">
-            <div class="form-group">
-                <label><i class="fas fa-tag"></i> 版本号 <span style="color: var(--danger);">*</span></label>
-                <input type="text" id="editVersionNumber" placeholder="格式: 1.0.0 或 1.2.3.4" pattern="^\d+(\.\d+){0,3}$" title="请输入有效的版本号" required>
-                <small style="color: var(--gray);">版本号格式: X.Y.Z 或 X.Y.Z.W</small>
-            </div>
-            <div class="form-group">
-                <label><i class="fas fa-link"></i> 下载链接 <span style="color: var(--danger);">*</span></label>
-                <input type="url" id="editVersionUrl" placeholder="http://example.com/app.exe" title="请输入有效的下载链接" required>
-                <small style="color: var(--gray);">客户端将从此链接下载更新文件</small>
-            </div>
-            <div class="form-group">
-                <label style="display: flex; align-items: center; gap: 0.5rem;">
-                    <input type="checkbox" id="editIsActiveVersion" style="width: auto;"> 
-                    <span><i class="fas fa-star"></i> 设置为当前激活版本</span>
-                </label>
-                <small style="color: var(--gray);">激活版本将在客户端检查更新时下发</small>
-            </div>
-            <div class="form-group">
-                <label style="display: flex; align-items: center; gap: 0.5rem;">
-                    <input type="checkbox" id="editForceUpdate" style="width: auto;"> 
-                    <span><i class="fas fa-exclamation-circle"></i> 强制更新</span>
-                </label>
-                <small style="color: var(--gray);">启用后，客户端必须更新才能继续使用</small>
-            </div>
-            <div class="form-group" style="display: flex; gap: 1rem;">
-                <button class="btn btn-primary" onclick="updateVersion()" style="flex: 1;">
-                    <i class="fas fa-save"></i> 更新版本
-                </button>
-                <button class="btn btn-secondary" onclick="hideModal('editVersionModal')" style="flex: 1;">
-                    <i class="fas fa-times"></i> 取消
-                </button>
+            <p id="confirmMessage" style="margin-bottom: 1.5rem;"></p>
+            <div style="display: flex; justify-content: flex-end; gap: 0.75rem;">
+                <button class="btn btn-secondary" onclick="hideModal('confirmModal')">取消</button>
+                <button class="btn btn-primary" id="confirmOkBtn">确认</button>
             </div>
         </div>
     </div>
@@ -1424,9 +1599,9 @@
                 <button class="close-btn" onclick="hideModal('logModal')">&times;</button>
             </div>
             <div class="log-viewer" id="logContent"></div>
+            <div id="logPager" style="text-align: center; padding: 0.75rem; border-top: 1px solid var(--gray-light); margin-top: 0.5rem;"></div>
         </div>
     </div>
-
     <!-- 提取结果模态框 -->
     <div class="modal" id="extractModal" style="z-index: 999;">
         <div class="modal-content" style="max-width: 1000px; max-height: 80vh;">
@@ -1442,15 +1617,16 @@
                 </div>
             </div>
             <div class="extract-container" style="overflow: hidden; display: flex; flex-direction: column; height: calc(80vh - 120px);">
-                <div class="extract-header" style="display: grid; grid-template-columns: 60px 1fr 1fr 120px 150px; padding: 1rem; background: var(--light); border-bottom: 1px solid var(--gray-light); font-weight: 600; color: var(--dark);">
-                    <div>序号</div>
-                    <div>密码内容</div>
-                    <div>来源文件</div>
-                    <div>操作</div>
-                    <div>时间戳</div>
-                </div>
-                <div class="extract-list" id="extractList" style="flex: 1; overflow-y: auto;"></div>
+            <div class="extract-header" style="display: grid; grid-template-columns: 60px 1fr 1fr 120px 150px; padding: 1rem; background: var(--light); border-bottom: 1px solid var(--gray-light); font-weight: 600; color: var(--dark);">
+                <div>序号</div>
+                <div>密码内容</div>
+                <div>来源文件</div>
+                <div>操作</div>
+                <div>时间戳</div>
             </div>
+            <div class="extract-list" id="extractList" style="flex: 1; overflow-y: auto;"></div>
+            <div id="extractPager" style="text-align: center; padding: 0.75rem; border-top: 1px solid var(--gray-light);"></div>
+        </div>
         </div>
     </div>
 
